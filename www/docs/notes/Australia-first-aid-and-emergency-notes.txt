@@ -1,5 +1,9 @@
 # Australia: first aid and emergency notes (kit summary - verify against current ANZCOR / St John / Red Cross guidance)
 
+NOT MEDICAL ADVICE. This is a short memory aid written for this kit, not professional advice or training,
+and it may be out of date. Always check current guidance (ANZCOR, St John Ambulance, Australian Red Cross,
+Healthdirect) and call 000 in an emergency. Use at your own risk.
+
 These notes override older US military advice in the other manuals where they conflict. They summarise
 widely published Australian first aid practice (ANZCOR guidelines). They are a memory aid, not training.
 Do a real first aid course (St John, Red Cross, Surf Life Saving) and replace this file when guidelines change.

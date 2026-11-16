@@ -4,7 +4,7 @@
 # Works from a USB/SSD even if it's mounted noexec (binaries are copied to a temp dir).
 KIT="$(cd "$(dirname "$0")" && pwd)"; cd "$KIT" || exit 1
 BIND=127.0.0.1; [ "$1" = "lan" ] && BIND=0.0.0.0
-LOG="${TMPDIR:-/tmp}/offline-ai-kit-logs"; mkdir -p "$LOG"
+LOG="${TMPDIR:-/tmp}/offline-toolkit-logs"; mkdir -p "$LOG"
 
 MODEL="${MODEL:-$(ls models/*.gguf 2>/dev/null | grep -v -i mmproj | head -1)}"
 [ -n "$MODEL" ] || { echo "No .gguf model in models/"; exit 1; }
@@ -14,7 +14,7 @@ CTX="${CTX:-8192}"
 # Static Linux binaries; if the drive won't let us execute, run copies from /tmp.
 BIN="$KIT/bin/linux"
 if ! "$BIN/miniserve" --version >/dev/null 2>&1; then
-  BIN="${TMPDIR:-/tmp}/offline-ai-kit-bin"; mkdir -p "$BIN"
+  BIN="${TMPDIR:-/tmp}/offline-toolkit-bin"; mkdir -p "$BIN"
   cp "$KIT/bin/linux/kiwix-serve" "$KIT/bin/linux/miniserve" "$BIN/" && chmod +x "$BIN"/*
 fi
 

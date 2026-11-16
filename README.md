@@ -87,9 +87,8 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
 * **No medication doses from the AI.** Use the packet, a pharmacist, Healthdirect 1800 022 222, or 000.
 * Many manuals are American and dated (2002). Australian first aid guidance (ANZCOR) differs - snake/funnel-web bite,
   bluebottle vs box jellyfish, etc. The included Australian notes are a summary, not training: do a first aid course.
-* Content licences: US federal manuals are public domain; WikiMed/Wikipedia CC BY-SA; OSM ODbL. The zimgit
-  "post-disaster" ZIM (in the Medium tier) bundles some commercial books (e.g. SAS Survival Handbook) - fine to
-  use, but don't resell/redistribute that one. Hesperian books ("Where There Is No Doctor") are free for personal/non-profit use.
+* See **Licences** below. The zimgit "post-disaster" ZIM bundles some commercial books (e.g. SAS Survival Handbook),
+  so it is opt-in only and must not be redistributed.
 * Windows parts were **not run** on a real Windows machine yet (see Testing).
 * Keep a paper copy of the essentials (first aid card, local evacuation map, contacts) - laptops die.
 
@@ -103,3 +102,14 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
 * Maps: Brisbane at zoom 9 and the CBD at zoom 15.5 rendered.
 * All of the above ran in Chrome with **every non-localhost request blocked** - zero external requests.
 * Windows: binaries verified as PE x86-64 (`llamafile.exe` is an APE polyglot with a valid PE header); not executed.
+
+## Licences
+* **Code** in this repository (launchers, web pages, scripts): MIT - see `LICENSE`.
+* **Content is not in this repository**; build scripts download it from the original publishers. Each item keeps its own licence:
+  * US federal manuals (FM 21-76, FM 4-25.11, USMC, FEMA/Ready.gov): public domain.
+  * Wikipedia / WikiMed / Wikivoyage / Wikibooks ZIMs: CC BY-SA (attribution travels with the ZIM). StackExchange ZIMs: CC BY-SA.
+  * Map data: (c) OpenStreetMap contributors, ODbL; Protomaps basemap; MapLibre (BSD-3), pdf.js (Apache-2.0), Noto fonts (OFL).
+  * llamafile (Apache-2.0), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
+  * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
+  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`--with-post-disaster`) and is never published in built kits.
+* `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.
