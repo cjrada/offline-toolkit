@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
-"""Publish a built kit zip to Google Cloud Storage. Python stdlib only - no service-account keys.
+"""Publish a built kit zip to Google Cloud Storage. Python stdlib only; no service-account keys.
 
-  # From GitHub Actions (keyless: GitHub OIDC -> Google STS via Workload Identity Federation):
-  python3 tools/publish_gcs.py --zip dist/offline-toolkit-small-<ver>.zip --bucket my-bucket \
-      --auth github-oidc --wif-provider projects/123/locations/global/workloadIdentityPools/github/providers/offline-toolkit
+  # In CI, after google-github-actions/auth (Workload Identity Federation) and setup-gcloud,
+  # or inside Cloud Build (the build's service account), or on your own machine after `gcloud auth login`:
+  python3 tools/publish_gcs.py --zip dist/offline-toolkit-small-<ver>.zip --bucket my-bucket
 
-  # From your own machine (uses `gcloud auth print-access-token`):
-  python3 tools/publish_gcs.py --zip dist/....zip --bucket my-bucket --auth gcloud
-
-Layout written (objects under a version are create-only: an existing object is never overwritten):
-  gs://BUCKET/PREFIX/<kit-name>/<version>/<kit-name>-<version>.zip
-  gs://BUCKET/PREFIX/<kit-name>/<version>/<kit-name>-<version>.zip.sha256
-  gs://BUCKET/PREFIX/<kit-name>/<version>/KIT-INFO.json
-  gs://BUCKET/PREFIX/<kit-name>/latest.json        (updated last, only after everything else succeeded)
+Layout written (everything under a version is create-only: an existing object is never overwritten):
+  gs://BUCKET/kits/<tier>/<version>/offline-toolkit-<tier>-<version>.zip
+  gs://BUCKET/kits/<tier>/<version>/offline-toolkit-<tier>-<version>.zip.sha256
+  gs://BUCKET/kits/<tier>/<version>/KIT-INFO.json
+  gs://BUCKET/kits/<tier>/latest.json      (updated last, only after everything else succeeded)
 
 Refuses to publish a kit whose KIT-INFO.json (read from inside the zip) says redistributable=false,
-is built from a dirty git tree, or has unpinned downloads (unless --allow-unpinned).
+is built from a dirty git tree, or has unpinned downloads.
 """
-import argparse, base64, hashlib, json, os, subprocess, sys, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, base64, hashlib, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request, zipfile
 
-STS = "https://sts.googleapis.com/v1/token"
-IAMCRED = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{}:generateAccessToken"
 GCS_UPLOAD = "https://storage.googleapis.com/upload/storage/v1/b/{}/o"
-SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
 CHUNK = 64 * 1024 * 1024  # multiple of 256 KiB, as GCS requires
 UA = "offline-toolkit-publish/1"
 
@@ -53,13 +47,6 @@ def http(method, url, body=None, headers=None, timeout=120):
         return e.code, e.headers, e.read()
 
 
-def post_json(url, obj, headers=None):
-    st, _, b = http("POST", url, json.dumps(obj).encode(), {"Content-Type": "application/json", **(headers or {})})
-    if st != 200:
-        die(f"POST {urllib.parse.urlparse(url).netloc} failed: HTTP {st}: {b[:500].decode(errors='replace')}")
-    return json.loads(b)
-
-
 # ---------------------------------------------------------------- auth
 class Token:
     def __init__(self, fn):
@@ -70,33 +57,6 @@ class Token:
             self.value, self.at = self.fn(), time.time()
             mask(self.value)
         return self.value
-
-
-def github_oidc_token(provider, service_account):
-    url, req_tok = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"), os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-    if not url or not req_tok:
-        die("no GitHub OIDC token available: the job needs `permissions: id-token: write`")
-    aud = "https://iam.googleapis.com/" + provider
-    st, _, b = http("GET", url + "&audience=" + urllib.parse.quote(aud, safe=""), headers={"Authorization": "Bearer " + req_tok})
-    if st != 200:
-        die(f"GitHub OIDC token request failed: HTTP {st}")
-    jwt = json.loads(b)["value"]
-    mask(jwt)
-    sts = post_json(STS, {
-        "grantType": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "audience": "//iam.googleapis.com/" + provider,
-        "scope": "https://www.googleapis.com/auth/cloud-platform",
-        "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
-        "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
-        "subjectToken": jwt,
-    })
-    tok = sts["access_token"]
-    mask(tok)
-    if not service_account:
-        return tok  # direct Workload Identity Federation: the pool principal itself has bucket access
-    sa = post_json(IAMCRED.format(urllib.parse.quote(service_account)), {"scope": [SCOPE], "lifetime": "3600s"},
-                   {"Authorization": "Bearer " + tok})
-    return sa["accessToken"]
 
 
 def gcloud_token():
@@ -217,12 +177,9 @@ def main(argv=None):
     ap.add_argument("--zip", required=True)
     ap.add_argument("--bucket", required=True)
     ap.add_argument("--prefix", default="kits", help="object prefix (default: kits)")
-    ap.add_argument("--auth", choices=["github-oidc", "gcloud", "env"], default="github-oidc",
-                    help="env = read an access token from $GCS_ACCESS_TOKEN")
-    ap.add_argument("--wif-provider", help="projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<id>")
-    ap.add_argument("--service-account", help="optional: impersonate this SA instead of direct federation")
+    ap.add_argument("--auth", choices=["gcloud", "env"], default="gcloud",
+                    help="gcloud = `gcloud auth print-access-token` (default); env = $GCS_ACCESS_TOKEN")
     ap.add_argument("--no-latest", action="store_true", help="do not update latest.json")
-    ap.add_argument("--allow-unpinned", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="check everything, upload nothing")
     a = ap.parse_args(argv)
 
@@ -234,16 +191,19 @@ def main(argv=None):
     if info.get("git_dirty"):
         die("kit was built from a dirty git tree; publish only from a clean commit")
     unpinned = [i["id"] for i in info.get("items", []) if not i.get("pinned") and not i["dest"].endswith(".pmtiles")]
-    if unpinned and not a.allow_unpinned:
+    if unpinned:
         die("kit contains unpinned downloads: " + ", ".join(unpinned))
-    name, version = info["name"], info["version"]
-    for v, what in ((name, "name"), (version, "version"), (a.prefix, "prefix")):
-        if not v or not all(c.isalnum() or c in "-_./" for c in v) or ".." in v or v.startswith("/"):
-            die(f"unsafe {what}: {v!r}")
+    name, version, tier = info["name"], info["version"], info.get("tier")
+    if tier not in ("small", "medium", "large") or name != f"offline-toolkit-{tier}":
+        die(f"unexpected kit name/tier in KIT-INFO.json: {name!r} / {tier!r}")
+    if not re.fullmatch(r"[0-9A-Za-z._-]{1,64}", version or "") or version.startswith("."):
+        die(f"unsafe version {version!r}")
+    if not re.fullmatch(r"[0-9A-Za-z_-]+(/[0-9A-Za-z_-]+)*", a.prefix.strip("/")):
+        die(f"unsafe prefix {a.prefix!r}")
 
     log(f"hashing {a.zip} ...")
     md5, sha = md5_b64(a.zip)
-    base = f"{a.prefix.strip('/')}/{name}"
+    base = f"{a.prefix.strip('/')}/{tier}"
     zname = f"{name}-{version}.zip"
     vdir = f"{base}/{version}"
     zsize = os.path.getsize(a.zip)
@@ -253,11 +213,7 @@ def main(argv=None):
         log("dry run: nothing uploaded")
         return 0
 
-    if a.auth == "github-oidc":
-        if not a.wif_provider:
-            die("--wif-provider is required with --auth github-oidc")
-        token = Token(lambda: github_oidc_token(a.wif_provider, a.service_account))
-    elif a.auth == "gcloud":
+    if a.auth == "gcloud":
         token = Token(gcloud_token)
     else:
         if not os.environ.get("GCS_ACCESS_TOKEN"):
@@ -271,7 +227,7 @@ def main(argv=None):
     upload(token, a.bucket, f"{vdir}/{zname}.sha256", data=f"{sha}  {zname}\n".encode(), ctype="text/plain")
     upload(token, a.bucket, f"{vdir}/KIT-INFO.json", data=info_bytes, ctype="application/json")
     if not a.no_latest:
-        latest = {"name": name, "version": version, "zip": f"{version}/{zname}", "sha256": sha, "size": zsize,
+        latest = {"name": name, "tier": tier, "version": version, "zip": f"{version}/{zname}", "sha256": sha, "size": zsize,
                   "git_commit": info.get("git_commit"), "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         upload(token, a.bucket, f"{base}/latest.json", data=(json.dumps(latest, indent=1) + "\n").encode(),
                ctype="application/json", cache_control="no-cache, max-age=0", create_only=False)

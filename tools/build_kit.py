@@ -15,7 +15,7 @@ and is only used if it matches the pinned sha256. Nothing downloaded is executed
 which is built from source by `go install` (verified by the Go checksum database). Archives are
 extracted member-by-member with path checks (no absolute paths, no '..', no links).
 """
-import argparse, fnmatch, hashlib, io, json, os, re, shutil, stat, subprocess, sys, tarfile, time
+import argparse, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, time
 import urllib.error, urllib.parse, urllib.request, zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +42,8 @@ def load_manifest(path):
         m = json.load(fh)
     ids = set()
     for it in m["items"]:
-        for k in ("id", "tier", "kind", "url", "dest"):
+        need = ("id", "tier", "kind", "dest") + (("source", "entry", "sha256") if it.get("kind") == "zim-extract" else ("url",))
+        for k in need:
             if k not in it:
                 die(f"manifest item {it.get('id')!r} missing {k!r}")
         if it["id"] in ids:
@@ -50,12 +51,20 @@ def load_manifest(path):
         ids.add(it["id"])
         if it["tier"] not in TIERS:
             die(f"{it['id']}: bad tier {it['tier']!r}")
-        if it["kind"] not in ("file", "tar", "zip", "pmtiles"):
+        if it["kind"] not in ("file", "tar", "zip", "pmtiles", "zim-extract", "git"):
             die(f"{it['id']}: bad kind {it['kind']!r}")
-        check_url(it["url"], it["id"])
+        if "url" in it:
+            check_url(it["url"], it["id"])
+        if it["kind"] == "git" and not re.fullmatch(r"[0-9a-f]{40}", it.get("commit") or ""):
+            die(f"{it['id']}: git items need a full 40-hex \"commit\"")
         safe_rel(it["dest"].rstrip("/"), it["id"])
         if it.get("sha256") is not None and not re.fullmatch(r"[0-9a-f]{64}", it["sha256"]):
             die(f"{it['id']}: sha256 must be 64 lowercase hex chars")
+    for it in m["items"]:
+        if it["kind"] == "zim-extract":
+            src = next((x for x in m["items"] if x["id"] == it["source"]), None)
+            if not src or src["kind"] != "file" or not src["dest"].endswith(".zim"):
+                die(f"{it['id']}: source {it['source']!r} must be a ZIM file item")
     return m
 
 
@@ -87,7 +96,7 @@ def select(m, tier, optional):
 
 
 def pinned(it):
-    return it.get("pin") == "none" or bool(it.get("sha256"))
+    return it.get("pin") == "none" or bool(it.get("sha256")) or (it["kind"] == "git" and bool(it.get("commit")))
 
 
 # ---------------------------------------------------------------- download
@@ -158,6 +167,11 @@ def fetch(it, cache, lock):
         if not os.path.exists(path):
             log(f"  downloading {url}")
             download(url, path)
+    return verify(it, path, cache, lock)
+
+
+def verify(it, path, cache, lock):
+    url = it.get("url") or f"{it.get('source')}:{it.get('entry')}"
     got = sha256_file(path)
     size = os.path.getsize(path)
     if it.get("sha256"):
@@ -176,6 +190,55 @@ def fetch(it, cache, lock):
 
 
 # ---------------------------------------------------------------- install
+def zim_extract(it, m, cache, lock):
+    """Pull one entry (e.g. a PDF) out of a pinned ZIM. The ZIM is verified first, then the entry."""
+    src = next(x for x in m["items"] if x["id"] == it["source"])
+    zim = fetch(dict(src), cache, None)
+    key = it["sha256"] or hashlib.sha256(f"{src['sha256']}|{it['entry']}".encode()).hexdigest()
+    path = os.path.join(cache, f"{key[:16]}-{os.path.basename(it['dest'])}")
+    if not os.path.exists(path):
+        try:
+            from libzim.reader import Archive
+        except ImportError:
+            die("zim-extract needs libzim: python3 -m pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt")
+        try:
+            data = bytes(Archive(zim).get_entry_by_path(it["entry"]).get_item().content)
+        except KeyError:
+            die(f"{it['id']}: entry {it['entry']!r} not found in {src['dest']}")
+        with open(path + ".part", "wb") as fh:
+            fh.write(data)
+        os.replace(path + ".part", path)
+        log(f"  extracted {it['entry']!r} from {os.path.basename(src['dest'])}")
+    return verify(it, path, cache, lock)
+
+
+def git_checkout(it, out, cache):
+    """Shallow-fetch exactly it['commit']. Git verifies every object against that hash, so this is as
+    strong a pin as a sha256. Hooks are disabled and nothing from the repo is executed."""
+    d = os.path.join(cache, "git-" + it["commit"])
+    g = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=" +
+         ("always" if os.environ.get("KIT_ALLOW_FILE_URLS") == "1" else "never"), "-C", d]
+    if not os.path.isdir(os.path.join(d, ".git")):
+        os.makedirs(d, exist_ok=True)
+        log(f"  fetching {it['url']} @ {it['commit'][:12]}")
+        subprocess.run(g + ["init", "-q"], check=True)
+        subprocess.run(g + ["fetch", "-q", "--depth", "1", it["url"], it["commit"]], check=True)
+        subprocess.run(g + ["-c", "advice.detachedHead=false", "checkout", "-q", "FETCH_HEAD"], check=True)
+    head = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    if head != it["commit"]:
+        die(f"{it['id']}: checked out {head}, expected {it['commit']}")
+    n = 0
+    for rel, p in walk(d):
+        if rel.startswith(".git/") or os.path.islink(p) or not match(rel, it.get("include", ["*"])):
+            continue
+        place(p, os.path.join(out, safe_rel(it["dest"].rstrip("/"), it["id"]), *rel.split("/")))
+        n += 1
+    if not n:
+        die(f"{it['id']}: nothing matched {it.get('include')}")
+    it["_sha256"], it["_size"] = None, None
+    log(f"  copied {n} file(s) -> {it['dest']}")
+
+
 def place(src, dst, mode=None):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.exists(dst):
@@ -327,9 +390,10 @@ def write_info(out, tier, items, version, rev, dirty):
         "name": f"offline-toolkit-{tier}", "tier": tier, "version": version,
         "git_commit": rev, "git_dirty": dirty, "redistributable": redistributable,
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "items": [{"id": it["id"], "version": it.get("version"), "licence": it.get("licence"), "url": it["url"],
+        "items": [{"id": it["id"], "version": it.get("version"), "licence": it.get("licence"),
+                   "url": it.get("url") or f"zim:{it.get('source')}/{it.get('entry')}", "commit": it.get("commit"),
                    "dest": it["dest"], "sha256": it.get("_sha256"), "size": it.get("_size"),
-                   "pinned": bool(it.get("sha256")), "redistributable": it.get("redistributable", True)}
+                   "pinned": pinned(it) and it.get("pin") != "none", "redistributable": it.get("redistributable", True)}
                   for it in items],
     }
     with open(os.path.join(out, "KIT-INFO.json"), "w", encoding="utf-8") as fh:
@@ -401,9 +465,12 @@ def main(argv=None):
     ap.add_argument("--lock", action="store_true", help="download and write sha256/size of unpinned items into the manifest")
     ap.add_argument("--check", action="store_true", help="list the selected items and exit")
     ap.add_argument("--pmtiles", help="path to an existing pmtiles/go-pmtiles binary")
+    ap.add_argument("--version", help="kit version label (default <yyyymmdd>-<commit>); [0-9A-Za-z._-]+")
     ap.add_argument("--no-index", action="store_true", help="skip rebuilding www/docs/index.js")
     a = ap.parse_args(argv)
 
+    if a.version is not None and not re.fullmatch(r"[0-9A-Za-z._-]{1,64}", a.version):
+        die(f"--version must match [0-9A-Za-z._-]+, got {a.version!r}")
     m = load_manifest(a.manifest)
     items = select(m, a.tier, a.optional)
     known = {it["id"] for it in m["items"]}
@@ -417,7 +484,8 @@ def main(argv=None):
         tot = 0
         for it in items:
             tot += it.get("size") or 0
-            flag = "pinned" if it.get("sha256") else ("unpinnable" if it.get("pin") == "none" else "UNPINNED")
+            flag = ("pinned" if it.get("sha256") else "git-pinned" if pinned(it) else
+                    "unpinnable" if it.get("pin") == "none" else "UNPINNED")
             url_ok = "" if it.get("verified_url", True) else "  (url not yet verified)"
             log(f"  {it['id']:<24} {flag:<10} {(it.get('size') or 0) / 1e9:6.2f} GB  -> {it['dest']}{url_ok}")
         log(f"{len(items)} items, {tot / 1e9:.1f} GB known, {len(unpinned)} unpinned")
@@ -432,10 +500,10 @@ def main(argv=None):
     if a.lock:
         lock = {}
         for it in items:
-            if it["kind"] == "pmtiles" or it.get("sha256"):
+            if it["kind"] in ("pmtiles", "git") or it.get("sha256"):
                 continue
             log(f"[{it['id']}]")
-            fetch(it, cache, lock)
+            zim_extract(it, m, cache, lock) if it["kind"] == "zim-extract" else fetch(it, cache, lock)
         if lock:
             write_lock(a.manifest, lock)
         else:
@@ -453,6 +521,12 @@ def main(argv=None):
         if it["kind"] == "pmtiles":
             build_map(it, m, out, cache, a.pmtiles)
             continue
+        if it["kind"] == "git":
+            git_checkout(it, out, cache)
+            continue
+        if it["kind"] == "zim-extract":
+            place(zim_extract(it, m, cache, None), os.path.join(out, it["dest"]))
+            continue
         path = fetch(it, cache, None)
         if it["kind"] == "file":
             place(path, os.path.join(out, it["dest"]), it.get("mode"))
@@ -463,7 +537,7 @@ def main(argv=None):
 
     rev, dirty, epoch = git_rev()
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", epoch))
-    version = time.strftime("%Y%m%d", time.gmtime(epoch)) + "-" + rev[:8] + ("-dirty" if dirty else "")
+    version = a.version or (time.strftime("%Y%m%d", time.gmtime(epoch)) + "-" + rev[:8] + ("-dirty" if dirty else ""))
     info = write_info(out, a.tier, items, version, rev, dirty)
     write_sums(out)
     if not info["redistributable"]:

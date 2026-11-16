@@ -158,11 +158,73 @@ class BuildKit(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("dry run", r.stderr)
 
+    def test_zim_extract(self):
+        try:
+            from libzim.writer import Creator, Item, StringProvider, Hint
+        except ImportError:
+            if os.environ.get("CI"):
+                raise  # never silently skip in CI
+            self.skipTest("libzim not installed (pip install -r tools/requirements-build.txt)")
+
+        class PdfItem(Item):
+            def __init__(self, path, data):
+                super().__init__(); self.p, self.d = path, data
+            def get_path(self): return self.p
+            def get_title(self): return self.p
+            def get_mimetype(self): return "application/pdf"
+            def get_contentprovider(self): return StringProvider(self.d)
+            def get_hints(self): return {Hint.FRONT_ARTICLE: False}
+
+        pdf = b"%PDF-1.4 fake manual " * 50
+        zim = os.path.join(self.src, "w.zim")
+        with Creator(zim).config_indexing(False, "eng") as c:
+            c.add_metadata("Title", "t")
+            c.add_item(PdfItem("files/Water (2).pdf", pdf.decode()))
+        zitem = {"id": "zim-water", "tier": "small", "kind": "file", "url": self.url("w.zim"), "sha256": sha(zim), "dest": "library/w.zim"}
+        good = hashlib.sha256(pdf).hexdigest()
+        ex = {"id": "pdf", "tier": "small", "kind": "zim-extract", "source": "zim-water", "entry": "files/Water (2).pdf",
+              "sha256": good, "dest": "www/docs/pdf/water.pdf"}
+        out = os.path.join(self.t, "kit")
+        r = self.build(self.manifest([zitem, ex]), out, "--frozen")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(open(os.path.join(out, "www/docs/pdf/water.pdf"), "rb").read(), pdf)
+        ex2 = dict(ex, sha256="1" * 64, dest="www/docs/pdf/x.pdf")
+        r = self.build(self.manifest([zitem, ex2], "m2.json"), os.path.join(self.t, "kit2"))
+        self.assertIn("sha256 mismatch", r.stderr)
+        ex3 = dict(ex, entry="files/missing.pdf", sha256="2" * 64)
+        r = self.build(self.manifest([zitem, ex3], "m3.json"), os.path.join(self.t, "kit3"))
+        self.assertIn("not found", r.stderr)
+
+    def test_git_commit_pin(self):
+        repo = os.path.join(self.t, "repo")
+        g = lambda *a: subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, text=True).stdout.strip()
+        os.makedirs(os.path.join(repo, "fonts", "Noto"))
+        open(os.path.join(repo, "fonts", "Noto", "0-255.pbf"), "w").write("glyphs")
+        open(os.path.join(repo, "README.md"), "w").write("not copied")
+        g("init", "-q"); g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "x")
+        commit = g("rev-parse", "HEAD")
+        it = {"id": "assets", "tier": "small", "kind": "git", "url": "file://" + repo, "commit": commit,
+              "include": ["fonts/*"], "dest": "www/maps/"}
+        out = os.path.join(self.t, "kit")
+        r = self.build(self.manifest([it]), out, "--frozen")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(out, "www/maps/fonts/Noto/0-255.pbf")))
+        self.assertFalse(os.path.exists(os.path.join(out, "www/maps/README.md")))
+        bad = dict(it, commit="0" * 40)
+        r = self.build(self.manifest([bad], "m2.json"), os.path.join(self.t, "kit2"))
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_version_validated(self):
+        r = self.build(self.manifest(self.items()), os.path.join(self.t, "kit"), "--version", "../evil")
+        self.assertIn("--version must match", r.stderr)
+
 
 class RealManifest(unittest.TestCase):
     def test_manifest_valid(self):
-        r = run(BUILD, "--check", "--tier", "large", "--with", "post-disaster")
+        r = run(BUILD, "--check", "--tier", "large", "--with", "post-disaster", "--frozen")
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(" 0 unpinned", r.stderr)
         m = json.loads(open(os.path.join(ROOT, "tools", "kit-manifest.json")).read())
         nonfree = [i["id"] for i in m["items"] if i.get("redistributable") is False]
         self.assertTrue(all(i.get("optional") for i in m["items"] if i["id"] in nonfree), "non-redistributable items must be optional")

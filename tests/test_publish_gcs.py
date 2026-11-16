@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests tools/publish_gcs.py's resumable upload against an in-process fake of the GCS JSON API,
 including dropped connections, 503s, partial chunks and the create-only precondition. No network."""
-import base64, hashlib, json, os, sys, tempfile, unittest, urllib.parse
+import base64, hashlib, json, os, sys, tempfile, unittest, urllib.parse, zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import publish_gcs as pg  # noqa: E402
@@ -87,6 +87,43 @@ class Upload(unittest.TestCase):
         pg.upload(self.tok, "bkt", "kits/latest.json", data=b'{"a":1}', create_only=False)
         pg.upload(self.tok, "bkt", "kits/latest.json", data=b'{"a":2}', create_only=False)
         self.assertEqual(fake.objects["kits/latest.json"], b'{"a":2}')
+
+
+class Main(unittest.TestCase):
+    def kit(self, **info):
+        fd, path = tempfile.mkstemp(suffix=".zip"); os.close(fd)
+        self.addCleanup(os.remove, path)
+        base = {"name": "offline-toolkit-small", "tier": "small", "version": "v1.2.0", "git_dirty": False,
+                "redistributable": True, "items": [{"id": "m", "dest": "models/m.gguf", "pinned": True}]}
+        base.update(info)
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr(f"{base['name']}/KIT-INFO.json", json.dumps(base))
+            zf.writestr(f"{base['name']}/start.sh", "#!/bin/sh\n")
+        return path
+
+    def publish(self, path):
+        fake = FakeGCS(); pg.http = fake; pg.time.sleep = lambda s: None
+        os.environ["GCS_ACCESS_TOKEN"] = "t"
+        pg.main(["--zip", path, "--bucket", "bkt", "--auth", "env"])
+        return fake
+
+    def test_layout(self):
+        fake = self.publish(self.kit())
+        self.assertEqual(sorted(fake.objects), [
+            "kits/small/latest.json", "kits/small/v1.2.0/KIT-INFO.json",
+            "kits/small/v1.2.0/offline-toolkit-small-v1.2.0.zip", "kits/small/v1.2.0/offline-toolkit-small-v1.2.0.zip.sha256"])
+        latest = json.loads(fake.objects["kits/small/latest.json"])
+        self.assertEqual(latest["zip"], "v1.2.0/offline-toolkit-small-v1.2.0.zip")
+        zip_bytes = fake.objects["kits/small/v1.2.0/offline-toolkit-small-v1.2.0.zip"]
+        self.assertEqual(latest["sha256"], hashlib.sha256(zip_bytes).hexdigest())
+        self.assertIn(latest["sha256"].encode(), fake.objects["kits/small/v1.2.0/offline-toolkit-small-v1.2.0.zip.sha256"])
+
+    def test_refusals(self):
+        for info, msg in (({"redistributable": False}, "redistributable"), ({"git_dirty": True}, "dirty"),
+                          ({"items": [{"id": "x", "dest": "a", "pinned": False}]}, "unpinned"),
+                          ({"version": "../x"}, "version"), ({"tier": "huge", "name": "offline-toolkit-huge"}, "tier")):
+            with self.subTest(msg=msg), self.assertRaises(SystemExit):
+                self.publish(self.kit(**info))
 
 
 if __name__ == "__main__":

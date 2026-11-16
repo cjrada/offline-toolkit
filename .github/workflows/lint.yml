@@ -13,14 +13,20 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -S warning start.sh stop.sh tools/*.sh tests/*.sh
+        run: shellcheck -S warning start.sh stop.sh tools/*.sh tests/*.sh scripts/*.sh
       - name: python syntax
         run: python3 -m py_compile tools/*.py tests/*.py
-      - name: model auto-selection tests
-        run: sh tests/test_pick_model.sh
+      - name: model auto-selection tests (sh and PowerShell)
+        run: |
+          sh tests/test_pick_model.sh
+          sh tests/test_pick_model_ps1.sh
+      - name: build dependency (libzim, hash-pinned)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes --only-binary ':all:' -r tools/requirements-build.txt
       - name: build-kit and publisher tests (offline)
         run: |
-          python3 tests/test_build_kit.py
-          python3 tests/test_publish_gcs.py
+          "$RUNNER_TEMP/venv/bin/python" tests/test_build_kit.py
+          "$RUNNER_TEMP/venv/bin/python" tests/test_publish_gcs.py
       - name: manifest pin status
-        run: python3 tools/build_kit.py --check --tier large
+        run: python3 tools/build_kit.py --check --frozen --tier large
