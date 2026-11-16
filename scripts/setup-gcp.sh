@@ -17,6 +17,8 @@
 #   * least-privilege grants: both SAs may CREATE objects in the bucket but not replace or delete them,
 #     except kits/<tier>/latest.json. kit-publisher may start Cloud Builds that run as kit-builder.
 set -euo pipefail
+# Never prompt: any question gcloud would ask becomes an error, which set -e turns into a non-zero exit.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
 REPO="cjrada/offline-toolkit"
 ENV_NAME="gcs-publish"
@@ -158,8 +160,9 @@ run gcloud iam service-accounts add-iam-policy-binding "$PUB" --project="$PROJEC
   --role=roles/iam.workloadIdentityUser --member="$PRINCIPAL" --condition=None >/dev/null
 LATEST_COND="title=latest-pointer-only,expression=resource.name.startsWith(\"projects/_/buckets/$BUCKET/objects/kits/\") && resource.name.endsWith(\"/latest.json\")"
 for sa in "$PUB" "$BLD"; do
-  # --condition=None: once the conditional latest.json binding exists, gcloud otherwise stops to ask
-  # which condition to use (from the second grant of the first run, and on every re-run).
+  # --condition=None: once the conditional latest.json binding exists, gcloud otherwise needs to ask
+  # which condition to use (from the second grant of the first run, and on every re-run), and with
+  # prompts disabled that is an error. tests/test_setup_gcp.py checks every grant names a condition.
   run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectCreator \
     --condition=None >/dev/null
   run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectUser \

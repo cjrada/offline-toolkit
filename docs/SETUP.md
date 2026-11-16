@@ -34,6 +34,10 @@ anything else:
   the current account, or move it yourself with `gcloud billing projects link`.
 * An existing project without billing, or one whose billing account is closed, stops the script with a hint.
 
+The script never prompts (`CLOUDSDK_CORE_DISABLE_PROMPTS=1`): anything gcloud would ask about is an
+error, and the script stops with a non-zero exit. Every IAM grant names its condition explicitly
+(`--condition=None` or the `latest.json` condition); `tests/test_setup_gcp.py` checks this in CI.
+
 You can re-run it at any time. It only creates what is missing and resets the security settings. It sets up:
 
 * **APIs:** storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager and logging.

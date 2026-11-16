@@ -16,6 +16,8 @@ jobs:
         run: shellcheck -S warning start.sh stop.sh tools/*.sh tests/*.sh scripts/*.sh
       - name: python syntax
         run: python3 -m py_compile tools/*.py tests/*.py
+      - name: setup-gcp static checks (explicit IAM conditions, no prompts)
+        run: python3 tests/test_setup_gcp.py
       - name: model auto-selection tests (sh and PowerShell)
         run: |
           sh tests/test_pick_model.sh
