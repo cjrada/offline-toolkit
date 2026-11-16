@@ -6,6 +6,8 @@
 #                             [--region australia-southeast1] [--bucket NAME] [--repo-id N] [--dry-run]
 #
 # Creates or updates:
+#   * billing: checks it is enabled. --billing-account links a project with NO billing account; a project
+#     already linked to a different account is never moved (the script stops instead).
 #   * the APIs: storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager, logging
 #   * a PRIVATE bucket (default <project>-kits): uniform access, public access prevention ENFORCED,
 #     7-day soft delete. Any allUsers / allAuthenticatedUsers binding found is removed.
@@ -29,7 +31,7 @@ while [ $# -gt 0 ]; do
     --bucket) BUCKET="${2:?}"; shift ;;
     --repo-id) REPO_ID="${2:?}"; shift ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) PROJECT_ID="$1" ;;
   esac
@@ -38,6 +40,14 @@ done
 BUCKET="${BUCKET:-$PROJECT_ID-kits}"
 [[ "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || { echo "invalid project id: $PROJECT_ID" >&2; exit 2; }
 [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]] || { echo "invalid bucket name: $BUCKET" >&2; exit 2; }
+BILLING="${BILLING#billingAccounts/}"; BILLING="${BILLING^^}"
+if [ -n "$BILLING" ] && ! [[ "$BILLING" =~ ^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$ ]]; then
+  echo "invalid billing account id: $BILLING (expected XXXXXX-XXXXXX-XXXXXX; see: gcloud billing accounts list)" >&2; exit 2
+fi
+if [ "$CREATE_PROJECT" = 1 ] && [ -z "$BILLING" ]; then
+  echo "--create-project needs --billing-account: a new project has no billing, and Cloud Build and" >&2
+  echo "Cloud Storage need it. List your accounts with: gcloud billing accounts list" >&2; exit 2
+fi
 
 say() { printf '\n== %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then { printf '  [dry-run] %q' "$1"; shift; printf ' %q' "$@"; echo; } >&2; else "$@"; fi; }
@@ -61,13 +71,48 @@ if ! exists gcloud projects describe "$PROJECT_ID"; then
     echo "global, so pick a unique one such as offline-toolkit-<suffix>)" >&2; exit 1
   fi
 fi
-if [ -n "$BILLING" ]; then run gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING"; fi
+
+say "Billing"
+# Storage buckets and Cloud Build need billing, so check it before enabling APIs. `billing projects link`
+# MOVES a project that is already linked elsewhere, so only link a project that has no billing account.
+if [ "$DRY" = 1 ]; then
+  if [ -n "$BILLING" ]; then run gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING"; fi
+else
+  BINFO=$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingEnabled,billingAccountName)') ||
+    { echo "could not read the billing info of $PROJECT_ID (you need billing.resourceAssociations.list on it)" >&2; exit 1; }
+  read -r B_ENABLED B_ACCOUNT <<<"$BINFO" || true
+  B_ACCOUNT="${B_ACCOUNT#billingAccounts/}"
+  if [ -z "$B_ACCOUNT" ]; then
+    if [ -z "$BILLING" ]; then
+      echo "project $PROJECT_ID has no billing account. Re-run with --billing-account XXXXXX-XXXXXX-XXXXXX" >&2
+      echo "(list yours with: gcloud billing accounts list)" >&2; exit 1
+    fi
+    run gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING" >/dev/null
+    echo "  linked to billing account $BILLING"
+  elif [ -n "$BILLING" ] && [ "$B_ACCOUNT" != "$BILLING" ]; then
+    echo "project $PROJECT_ID is already linked to billing account $B_ACCOUNT, not $BILLING." >&2
+    echo "This script does not move projects between billing accounts. Re-run without --billing-account to" >&2
+    echo "keep $B_ACCOUNT, or move it yourself first: gcloud billing projects link $PROJECT_ID --billing-account=$BILLING" >&2
+    exit 1
+  elif [ "${B_ENABLED,,}" != "true" ]; then
+    echo "project $PROJECT_ID is linked to billing account $B_ACCOUNT, but billing is not enabled" >&2
+    echo "(the account is probably closed or suspended). Fix it in the console: Billing -> Account management." >&2
+    exit 1
+  else
+    echo "  billing account $B_ACCOUNT (enabled)"
+  fi
+fi
 PROJECT_NUM=$( [ "$DRY" = 1 ] && echo 123456789012 || gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 
 say "APIs"
-run gcloud services enable storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com \
-  sts.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com logging.googleapis.com \
-  --project="$PROJECT_ID"
+# A billing link can take a minute to reach Service Usage, so retry a fresh link a few times.
+for try in 1 2 3 4; do
+  run gcloud services enable storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com \
+    sts.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com logging.googleapis.com \
+    --project="$PROJECT_ID" && break
+  [ "$try" -lt 4 ] || { echo "could not enable the APIs; check billing on $PROJECT_ID and re-run" >&2; exit 1; }
+  echo "  enabling APIs failed (billing may still be propagating); retrying in 30 s" >&2; sleep 30
+done
 
 say "Bucket gs://$BUCKET (private)"
 if exists gcloud storage buckets describe "gs://$BUCKET" --project="$PROJECT_ID"; then
@@ -113,7 +158,10 @@ run gcloud iam service-accounts add-iam-policy-binding "$PUB" --project="$PROJEC
   --role=roles/iam.workloadIdentityUser --member="$PRINCIPAL" --condition=None >/dev/null
 LATEST_COND="title=latest-pointer-only,expression=resource.name.startsWith(\"projects/_/buckets/$BUCKET/objects/kits/\") && resource.name.endsWith(\"/latest.json\")"
 for sa in "$PUB" "$BLD"; do
-  run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectCreator >/dev/null
+  # --condition=None: once the conditional latest.json binding exists, gcloud otherwise stops to ask
+  # which condition to use (from the second grant of the first run, and on every re-run).
+  run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectCreator \
+    --condition=None >/dev/null
   run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectUser \
     --condition="$LATEST_COND" >/dev/null
 done

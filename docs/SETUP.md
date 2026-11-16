@@ -26,6 +26,14 @@ bash scripts/setup-gcp.sh my-existing-project      # bucket "<project>-kits"
 taken. Pass an existing project of yours, or a unique new ID such as `offline-toolkit-2611` with
 `--create-project`. The script prints this hint if creation fails.
 
+**Billing.** Cloud Storage and Cloud Build need a billing account, so the script checks billing before
+anything else:
+* `--create-project` requires `--billing-account` (list yours with `gcloud billing accounts list`).
+* `--billing-account` links only a project that has **no** billing account yet. If the project is already
+  linked to a different account, the script stops and doesn't move it. Re-run without the flag to keep
+  the current account, or move it yourself with `gcloud billing projects link`.
+* An existing project without billing, or one whose billing account is closed, stops the script with a hint.
+
 You can re-run it at any time. It only creates what is missing and resets the security settings. It sets up:
 
 * **APIs:** storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager and logging.
