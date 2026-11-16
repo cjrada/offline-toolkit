@@ -13,6 +13,14 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -S warning start.sh stop.sh tools/*.sh
+        run: shellcheck -S warning start.sh stop.sh tools/*.sh tests/*.sh
       - name: python syntax
-        run: python3 -m py_compile tools/build_index.py
+        run: python3 -m py_compile tools/*.py tests/*.py
+      - name: model auto-selection tests
+        run: sh tests/test_pick_model.sh
+      - name: build-kit and publisher tests (offline)
+        run: |
+          python3 tests/test_build_kit.py
+          python3 tests/test_publish_gcs.py
+      - name: manifest pin status
+        run: python3 tools/build_kit.py --check --tier large

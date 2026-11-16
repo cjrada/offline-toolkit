@@ -1,0 +1,74 @@
+# Build the small kit from the hash-pinned manifest and publish the zip to Google Cloud Storage.
+#
+# Safe for a PUBLIC repository:
+#  * Runs only when someone with write access starts it by hand on main (no pull_request /
+#    pull_request_target / issue triggers, so forks and outside contributors can never run it).
+#  * No secrets at all: GitHub's OIDC token is exchanged for a short-lived Google token through
+#    Workload Identity Federation. Google only accepts tokens for this repository id, ref main and the
+#    `gcs-publish` environment (see docs/PUBLISHING.md); the environment can require a reviewer.
+#  * Every third-party download is sha256-pinned (--frozen fails otherwise) and none of it is executed;
+#    the only built tool (go-pmtiles) comes from `go install`, verified by the Go checksum database.
+#  * Actions are pinned to full commit SHAs; the token GitHub gives the job is read-only.
+#  * publish_gcs.py refuses non-redistributable kits, dirty trees and overwriting a published version.
+name: publish-kit
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and check, but do not upload"
+        type: boolean
+        default: true
+permissions: {}
+concurrency:
+  group: publish-kit
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'cjrada/offline-toolkit' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    environment: gcs-publish
+    permissions:
+      contents: read
+      id-token: write  # lets the job ask GitHub for an OIDC token; nothing else
+    env:
+      WORK: /mnt/kit  # hosted runners have a large scratch disk at /mnt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check configuration
+        env:
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          [ -n "$GCS_BUCKET" ] || { echo "::error::set the GCS_BUCKET variable on the gcs-publish environment"; exit 1; }
+          [ -n "$GCP_WIF_PROVIDER" ] || { echo "::error::set the GCP_WIF_PROVIDER variable on the gcs-publish environment"; exit 1; }
+          python3 tools/build_kit.py --tier small --frozen --check
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q poppler-utils
+          go version
+          sudo mkdir -p "$WORK" && sudo chown "$(id -u):$(id -g)" "$WORK"
+          df -h / /mnt
+      - name: Build kit
+        env:
+          # Defence in depth: hide the OIDC request credentials from the build step.
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+        run: |
+          python3 tools/build_kit.py --tier small --frozen \
+            --out "$WORK/offline-toolkit-small" --cache "$WORK/cache" --zip "$WORK/kit.zip"
+          rm -rf "$WORK/cache"
+          ls -la "$WORK"
+      - name: Publish to GCS
+        env:
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -- --zip "$WORK/kit.zip" --bucket "$GCS_BUCKET" --auth github-oidc --wif-provider "$GCP_WIF_PROVIDER"
+          [ -n "$GCP_SERVICE_ACCOUNT" ] && set -- "$@" --service-account "$GCP_SERVICE_ACCOUNT"
+          [ "$DRY_RUN" = "true" ] && set -- "$@" --dry-run
+          python3 tools/publish_gcs.py "$@"

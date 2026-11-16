@@ -6,10 +6,9 @@ KIT="$(cd "$(dirname "$0")" && pwd)"; cd "$KIT" || exit 1
 BIND=127.0.0.1; [ "$1" = "lan" ] && BIND=0.0.0.0
 LOG="${TMPDIR:-/tmp}/offline-toolkit-logs"; mkdir -p "$LOG"
 
-MODEL="${MODEL:-$(ls models/*.gguf 2>/dev/null | grep -v -i mmproj | head -1)}"
-[ -n "$MODEL" ] || { echo "No .gguf model in models/"; exit 1; }
-MMPROJ=$(ls models/*mmproj*.gguf 2>/dev/null | head -1)
-CTX="${CTX:-8192}"
+# Auto-pick the biggest model that fits this computer's RAM (override: MODEL=models/x.gguf, CTX=4096).
+. "$KIT/tools/pick-model.sh"
+pick_model || exit 1
 
 # Static Linux binaries; if the drive won't let us execute, run copies from /tmp.
 BIN="$KIT/bin/linux"
@@ -22,7 +21,7 @@ PIDS=""
 cleanup(){ echo; echo "Stopping..."; kill $PIDS 2>/dev/null; exit 0; }
 trap cleanup INT TERM
 
-echo "Starting AI model ($(basename "$MODEL"))..."
+echo "Starting AI model ($(basename "$MODEL"), context $CTX) - $PICK_REASON..."
 # llamafile is an Actually Portable Executable; running it via sh works even on noexec mounts
 # and avoids binfmt/WINE hijacking on some distros.
 sh "$KIT/bin/llamafile.exe" --server -m "$MODEL" ${MMPROJ:+--mmproj "$MMPROJ"} \

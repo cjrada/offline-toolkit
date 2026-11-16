@@ -18,6 +18,12 @@ No install, no internet, no accounts. Everything runs on `localhost` in your web
 * **Linux:** `sh start.sh` (or `sh start.sh lan`). Ctrl+C or `sh stop.sh` to stop.
   Works even if the drive is mounted `noexec` (it runs llamafile via `sh` and copies the two small static binaries to /tmp).
 * Then open <http://localhost:8000/>. The AI needs ~10-60 s to load (longer from a slow USB stick).
+* **The model is picked automatically**: the biggest `models/*.gguf` whose size + ~3 GB headroom fits the
+  laptop's RAM. A 4 GB laptop gets the 1.7B model with a 4k context, and an 8 GB laptop gets the 4B model.
+  If you add an 8B model, a 16 GB laptop uses it. The launcher prints which model it chose and why.
+  Preview the choice with `sh tools/pick-model.sh` (Windows: `powershell -File tools\pick-model.ps1`).
+  `models/spare/` is never auto-picked (vision, "uncensored", experiments). A vision model is
+  paired with its projector by name: `x.gguf` + `x.mmproj.gguf`.
 * Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`.
   On Windows: `set MODEL=models\x.gguf` then `start.bat`.
 
@@ -28,14 +34,34 @@ start.sh / start.bat / stop.sh / stop.bat
 bin/llamafile.exe            llamafile 0.10.6 - ONE Actually Portable Executable for Windows + Linux (+ macOS), x86-64 & ARM64
 bin/linux/                   kiwix-serve 3.8.2, miniserve 0.35.0 (static Linux x86-64)
 bin/windows/                 kiwix-serve.exe 3.8.1 (+ ICU DLLs), miniserve.exe 0.35.0 (Windows x86-64)
-models/                      qwen3-4b-instruct-2507-q4_k_m.gguf (2.5 GB, Apache-2.0)
+models/                      qwen3-4b-instruct-2507-q4_k_m.gguf (2.5 GB) + qwen3-1.7b-q4_k_m.gguf (1.1 GB, for 4 GB laptops), Apache-2.0
 library/                     Kiwix ZIMs: WikiMed mini (166 MB), zimgit Water, Medicine, Knots (~115 MB)
 www/index.html               home page
 www/docs/                    Ask-the-Manuals (RAG): index.js (prebuilt), rag.js, pdf/, notes/, lib/pdf.js
 www/maps/                    australia.pmtiles (2.2 GB, all of Australia to street level) + MapLibre viewer, fonts, sprites
 tools/build_index.py         rebuild the manuals index (needs python3 + pdftotext; only for rebaking)
-tools/download-extras.sh     commented download list for the Medium/Large tiers
+tools/pick-model.sh / .ps1   automatic model choice used by start.sh / start.bat
+tools/build_kit.py           builds the whole kit from tools/kit-manifest.json (hash-pinned downloads)
+tools/publish_gcs.py         uploads a built kit zip to Google Cloud Storage (keyless, from CI)
+tools/download-extras.sh     commented download list for one-off Medium/Large additions
+KIT-INFO.json, SHA256SUMS    what was built, from which commit, with the hash of every file
 ```
+
+## Build a kit
+
+None of the large content is in git. `tools/build_kit.py` downloads it from the original publishers,
+**checks each file against the sha256 pinned in `tools/kit-manifest.json`**, and lays out the folder:
+
+```sh
+python3 tools/build_kit.py --check              # list items, sizes, and what is still unpinned
+python3 tools/build_kit.py --zip                # small tier -> dist/offline-toolkit-small/ (+ .zip)
+python3 tools/build_kit.py --tier medium        # or large; each tier includes the ones below it
+python3 tools/build_kit.py --lock               # pin new or changed downloads, then review and commit
+```
+
+Needs python3, `pdftotext` (poppler-utils) and Go (for go-pmtiles, the map extractor). Prebuilt kits are
+published to Google Cloud Storage by the manually started `publish-kit` workflow. See
+[docs/PUBLISHING.md](docs/PUBLISHING.md) for the security model and one-time GCP/GitHub setup.
 
 ### Ask the Manuals (RAG) - how it works
 Python-free at run time. `www/docs/index.js` holds ~2,200 pre-chunked passages from the PDFs. The page does
@@ -111,5 +137,5 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   * Map data: (c) OpenStreetMap contributors, ODbL; Protomaps basemap; MapLibre (BSD-3), pdf.js (Apache-2.0), Noto fonts (OFL).
   * llamafile (Apache-2.0), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
   * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
-  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`--with-post-disaster`) and is never published in built kits.
+  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`build_kit.py --with post-disaster`), marks the kit `"redistributable": false`, and `publish_gcs.py` refuses to upload such a kit.
 * `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.
