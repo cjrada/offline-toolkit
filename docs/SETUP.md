@@ -90,9 +90,28 @@ At the end the script prints the exact `gh` commands for step 2.
 
 What happens:
 
-* **small:** the runner frees about 30 GB of disk and fails early if it has less than 25 GB. It then
-  builds with `--frozen` and authenticates only *after* the build. Finally `tools/publish_gcs.py` uploads.
-* **medium/large:** the job runs `gcloud builds submit --no-source --config cloudbuild.yaml`.
+* Both jobs validate the inputs with `tools/ci_inputs.sh` (tier, version pattern, manifest pins).
+* **small** runs as two jobs, so build code never shares a runner with Google credentials:
+  * **`build`** has `contents: read` only: no OIDC token, no environment, no environment variables.
+    It frees about 30 GB of disk (fails early below 25 GB), installs poppler and the hash-pinned libzim,
+    builds with `--frozen`, runs `publish_gcs.py --dry-run`, and records the zip's sha256. Then it uploads
+    the zip as-is (`archive: false`) as a workflow artifact with 1-day retention.
+  * **`publish`** runs in the `gcs-publish` environment and is the only job that may request an OIDC token.
+    It installs and builds nothing. It re-validates everything the build job passed on, downloads the
+    artifact by id into a new empty directory, and checks two things: the file's sha256 against the build
+    job's output, and that `KIT-INFO.json` inside the zip has the expected tier and version. It then repeats
+    the `--dry-run` with the real bucket. Only after that does it authenticate and upload with
+    `tools/publish_gcs.py`.
+  * A small **dry run** still runs both jobs, so it also tests the hand-off and the environment's variables.
+    The publish job still waits for the `gcs-publish` approval, but it skips authentication and upload.
+* **Artifact size and timing (small, ~6 GB zip):**
+  * GitHub documents no size limit for a single artifact. upload-artifact's README lists only 500 artifacts per job and the account's storage quota.
+  * Artifact storage is metered only for private repositories. This repo is public, so the zip doesn't count against a quota.
+  * Expect the upload and the download to take a few minutes each. This is an estimate; check the step timings in the first real run.
+  * **Approve the publish job within a day.** After 1 day the artifact expires and the download fails, and you have to re-run the whole workflow.
+  * In a public repository, anyone signed in to GitHub can download a run's artifacts while they exist. Only
+    redistributable content goes in the small kit (the uploader enforces it), but it will be public for that day.
+* **medium/large:** the `build` job is skipped and the `publish` job runs `gcloud builds submit --no-source --config cloudbuild.yaml`.
   * Cloud Build clones this repo at exactly the workflow's commit and verifies the hash.
   * It builds on an E2_HIGHCPU_8 machine with a 600 GB disk and uploads the same way, as `kit-builder`.
   * The workflow polls until the build finishes.
