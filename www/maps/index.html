@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Offline map – Australia</title>
+<link rel="stylesheet" href="lib/maplibre-gl.css">
+<script src="lib/maplibre-gl.js"></script><script src="lib/pmtiles.js"></script><script src="lib/basemaps.js"></script>
+<style>body{margin:0}#map{position:absolute;inset:0}#bar{position:absolute;z-index:2;top:8px;left:50px;background:#fff;padding:4px 8px;border-radius:4px;font:13px system-ui}</style>
+</head><body><div id="bar"><a href="../">&larr; Home</a> &middot; <span id="pos">Offline OSM map of Australia</span></div><div id="map"></div>
+<script>
+const protocol = new pmtiles.Protocol(); maplibregl.addProtocol("pmtiles", protocol.tile);
+const base = location.href.replace(/[^/]*$/, "");
+const map = new maplibregl.Map({ container: "map", center: [153.03, -27.47], zoom: 9, maxBounds: [[100,-50],[170,0]],
+  style: { version: 8,
+    glyphs: base + "fonts/{fontstack}/{range}.pbf", sprite: base + "sprites/v4/light",
+    sources: { protomaps: { type: "vector", url: "pmtiles://" + base + "australia.pmtiles",
+      attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> contributors, Protomaps' } },
+    layers: basemaps.layers("protomaps", basemaps.namedFlavor("light"), { lang: "en" }) } });
+map.addControl(new maplibregl.NavigationControl()); map.addControl(new maplibregl.ScaleControl());
+map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true }, trackUserLocation: true }));
+map.on("mousemove", e => pos.textContent = `${e.lngLat.lat.toFixed(5)}, ${e.lngLat.lng.toFixed(5)}  (z${map.getZoom().toFixed(1)})`);
+</script></body></html>

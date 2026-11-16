@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ask the Manuals (offline)</title>
+<link rel="stylesheet" href="../style.css">
+</head><body>
+<header><a href="../">&larr; Home</a> <h1>Ask the Manuals</h1></header>
+<main>
+<p class="note">Answers come only from the survival PDFs on this drive, with numbered citations you can open. The AI can still be wrong &mdash; always check the cited page.</p>
+<form id="f"><input id="q" placeholder="e.g. How do I make water safe to drink?" autocomplete="off" autofocus>
+<button>Ask</button> <label><input type="checkbox" id="searchOnly"> search only (no AI)</label></form>
+<div id="answer" class="answer"></div>
+<h3 id="srcH" hidden>Sources</h3><ol id="sources" class="sources"></ol>
+<details><summary>Library on this drive (<span id="ndocs"></span>) &middot; add your own PDFs</summary>
+<ul id="doclist"></ul>
+<p>Add PDFs (stored in this browser only, nothing leaves the laptop): <input type="file" id="add" accept="application/pdf" multiple> <span id="addStatus"></span></p>
+<p class="small">To bake PDFs into the drive for every browser: copy them into <code>www/docs/pdf/</code> and run <code>python3 tools/build_index.py</code>.</p>
+</details>
+</main>
+<script src="index.js"></script>
+<script type="module" src="rag.js"></script>
+</body></html>

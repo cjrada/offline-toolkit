@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Offline Survival Kit</title><link rel="stylesheet" href="style.css"></head>
+<body><header><h1>Offline Survival Kit</h1><span id="status" class="small"></span></header>
+<main>
+<div class="tiles">
+ <a class="tile" id="chat"><h2>Chat</h2>General offline AI assistant (llamafile).</a>
+ <a class="tile" href="docs/"><h2>Ask the Manuals</h2>Answers from the survival PDFs, with page citations.</a>
+ <a class="tile" id="lib"><h2>Library</h2>Offline wiki &amp; guides (Kiwix): water, medicine, knots, post-disaster.</a>
+ <a class="tile" href="maps/"><h2>Maps</h2>Offline map of all of Australia (OpenStreetMap).</a>
+ <a class="tile" href="docs/pdf/"><h2>PDF shelf</h2>Browse the raw manuals.</a>
+</div>
+<p class="warn"><b>Safety:</b> AI can be confidently wrong. Never rely on it to identify edible plants or mushrooms, or for medicine doses. Check the cited page or library article, and get professional help (000 in Australia) whenever you can.</p>
+<p class="small">Phone access: if the kit was started with LAN mode, open <code>http://&lt;this-laptop-IP&gt;:8000</code> on a phone on the same Wi-Fi/hotspot.</p>
+</main>
+<script>
+const h = location.hostname, p = location.protocol;
+document.getElementById("chat").href = `${p}//${h}:8080/`;
+document.getElementById("lib").href = `${p}//${h}:8081/`;
+fetch(`${p}//${h}:8080/health`).then(r=>r.json()).then(j=>status.textContent="AI: "+(j.status==="ok"?"ready":"loading…")).catch(()=>status.textContent="AI: starting / not running");
+</script></body></html>

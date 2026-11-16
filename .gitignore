@@ -1,0 +1,17 @@
+# Large/binary payloads - fetched by scripts, never committed
+bin/
+models/
+library/
+*.gguf
+*.zim
+*.pmtiles
+*.pdf
+*.exe
+*.dll
+www/docs/index.js
+www/docs/lib/
+www/maps/lib/
+www/maps/fonts/
+www/maps/sprites/
+dist/
+*.zip

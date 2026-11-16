@@ -1,0 +1,64 @@
+# Australia: first aid and emergency notes (kit summary - verify against current ANZCOR / St John / Red Cross guidance)
+
+These notes override older US military advice in the other manuals where they conflict. They summarise
+widely published Australian first aid practice (ANZCOR guidelines). They are a memory aid, not training.
+Do a real first aid course (St John, Red Cross, Surf Life Saving) and replace this file when guidelines change.
+
+## Emergency numbers (Australia)
+Emergency (police, fire, ambulance): 000. From a mobile with no coverage on your network: 112 also works.
+Text/TTY: 106. SES (flood, storm help): 132 500. Poisons Information Centre: 13 11 26 (24 hours).
+Healthdirect nurse advice: 1800 022 222. Queensland: 13 HEALTH (13 43 25 84).
+
+## Snake bite (all Australian snakes) - pressure immobilisation bandage
+Australian practice for snake bite is the pressure immobilisation technique, NOT a tourniquet or a
+constricting band, NOT cutting or sucking the bite, and NOT washing the bite (venom on the skin can identify the snake).
+Do not try to catch or kill the snake. Call 000.
+1. Keep the person still and calm; lie them down. Movement spreads venom through the lymph system.
+2. Apply a broad elastic (or crepe) bandage over the bite site firmly, then bandage the whole limb from the
+   fingers or toes upward as far as possible, as firm as for a sprain. Mark the bite site on the bandage.
+3. Splint the limb to stop movement (a stick, rolled newspaper, or bandage the legs together).
+4. Do not remove the bandage; leave that to hospital. Watch breathing; start CPR if needed.
+Most bites are on a limb. For bites on the body or face, apply firm pressure over the site if possible and keep still.
+
+## Funnel-web spider and mouse spider bite
+Treat exactly like a snake bite: pressure immobilisation bandage, splint, keep still, call 000.
+
+## Redback spider and most other spider bites
+Do NOT use a pressure bandage for redback bites (it can increase pain). Wash, apply an ice pack or cold
+compress to relieve pain, and seek medical advice if pain is severe, spreads, or there is sweating or vomiting.
+
+## Box jellyfish and Irukandji (tropical waters, northern Australia)
+Call 000. Get the person out of the water. Pour vinegar liberally over the stung area for at least 30 seconds
+to deactivate stingers that have not fired yet, then remove tentacles. Start CPR if needed.
+Do not rub the area and do not use fresh water.
+
+## Bluebottle (non-tropical waters)
+Remove tentacles, rinse with sea water, then put the area in hot water (as hot as comfortable) for 20 minutes.
+If no hot water, use a cold pack. Do not use vinegar for bluebottles.
+
+## Blue-ringed octopus and cone shell
+Pressure immobilisation bandage if on a limb, call 000, and be ready to give rescue breathing / CPR for a long
+time: these venoms paralyse breathing while the person may still be aware.
+
+## Heat illness (common in Queensland summers)
+Heat stroke (hot, confused, may stop sweating) is an emergency: call 000, move to shade, remove extra clothing,
+cool aggressively with water and fanning, ice packs to neck, armpits and groin. Give sips of water only if fully alert.
+
+## Bushfire
+Follow the local fire service and the Australian Warning System (Advice, Watch and Act, Emergency Warning).
+Leaving early is the safest option. If trapped, shelter in a solid building or a cleared area away from fuel,
+cover skin with natural-fibre clothing, and drink water.
+
+## Floods
+Never drive, walk or swim through floodwater ("If it's flooded, forget it"). Floodwater can carry sewage and
+debris; treat any water you drink by boiling or disinfection.
+
+## Water
+Boil water at a rolling boil for at least 1 minute to make it safe from germs. If you cannot boil, use
+water purification tablets as directed, or plain unscented household bleach as directed by health authorities.
+Boiling does not remove chemicals or fuel contamination.
+
+## Plants, mushrooms, medicines
+Do not eat wild mushrooms or unknown plants based on an AI answer or a photo app - deaths from death cap
+mushrooms occur in Australia. Do not take medication doses from the AI; use the packet, a pharmacist,
+Healthdirect, or a doctor.
