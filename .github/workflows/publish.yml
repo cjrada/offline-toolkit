@@ -1,17 +1,26 @@
 # Build a kit from the hash-pinned manifest and publish it to Google Cloud Storage.
-#   small         -> built on this GitHub runner, uploaded from here.
-#   medium/large  -> too big for a runner: submitted to Cloud Build (cloudbuild.yaml, 600 GB disk).
+#   small         -> two jobs:
+#                    `build`   builds the kit on a GitHub runner with NO cloud access (contents: read only,
+#                              no id-token, no environment) and hands the zip on as a 1-day artifact;
+#                    `publish` (gcs-publish environment, id-token) downloads that zip into a fresh
+#                              directory, checks its sha256 against the build job's output, then
+#                              authenticates and uploads. It installs and builds nothing.
+#   medium/large  -> too big for a runner: `build` is skipped and `publish` submits the build to
+#                    Cloud Build (cloudbuild.yaml, 600 GB disk).
 #
 # Safe for a PUBLIC repository:
 #  * Runs only on a v* tag push or a manual run, and only on refs/heads/main or refs/tags/v*.
 #    There are no pull_request / pull_request_target / issue triggers, so forks never reach it.
-#  * The job uses the `gcs-publish` environment (required reviewer; deployment refs: main and v* tags).
+#  * Only the publish job uses the `gcs-publish` environment (required reviewer; deployment refs: main
+#    and v* tags) and only it may request an OIDC token.
 #  * No secrets. GitHub's OIDC token goes through Workload Identity Federation to impersonate the
 #    kit-publisher service account. Google accepts it only for this repository id and name, main or v*
 #    tags, and the gcs-publish environment (scripts/setup-gcp.sh).
-#  * Every download is sha256- or git-commit-pinned (--frozen) and none of it is executed. Google
-#    credentials are created only after the build, in the steps that upload.
-#  * Inputs reach the shell only through env and are validated against strict patterns.
+#  * Every download is sha256- or git-commit-pinned (--frozen) and none of it is executed. Build-time
+#    dependencies (poppler, libzim) run only in the build job, which cannot get Google credentials, so
+#    nothing they leave on PATH, in $GITHUB_ENV or in the workspace reaches the job that can.
+#  * Inputs reach the shell only through env and are validated against strict patterns
+#    (tools/ci_inputs.sh); the publish job re-validates everything the build job hands it.
 #  * Actions and container images are pinned to full SHAs/digests.
 name: publish-kit
 on:
@@ -37,20 +46,29 @@ concurrency:
   group: publish-kit-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  publish:
-    if: github.repository == 'cjrada/offline-toolkit' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+  # ---------------- small: build with no cloud access ----------------
+  build:
+    if: >-
+      github.repository == 'cjrada/offline-toolkit' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      (github.event_name == 'push' || inputs.tier == 'small')
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
-    environment: gcs-publish
+    timeout-minutes: 240
     permissions:
-      contents: read
-      id-token: write  # lets the auth step ask GitHub for an OIDC token; nothing else
+      contents: read  # nothing else: no id-token, no environment, no secrets or environment variables
+    outputs:
+      tier: ${{ steps.cfg.outputs.tier }}
+      version: ${{ steps.cfg.outputs.version }}
+      dry_run: ${{ steps.cfg.outputs.dry_run }}
+      zip_name: ${{ steps.hash.outputs.zip_name }}
+      sha256: ${{ steps.hash.outputs.sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Validate inputs and configuration
+      - name: Validate inputs
         id: cfg
         env:
           IN_TIER: ${{ inputs.tier }}
@@ -58,30 +76,11 @@ jobs:
           IN_DRY_RUN: ${{ inputs.dry_run }}
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
-          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
-          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
-          tier="${IN_TIER:-small}"
-          version="$IN_VERSION"
-          if [ -z "$version" ]; then
-            if [ "$EVENT" = push ]; then version="$REF_NAME"; else version="$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)"; fi
-          fi
-          dry_run=false; [ "$EVENT" = workflow_dispatch ] && [ "$IN_DRY_RUN" = true ] && dry_run=true
-          echo "$tier" | grep -Eqx '^(small|medium|large)$' || { echo "::error::invalid tier"; exit 1; }
-          echo "$version" | grep -Eqx '^[0-9A-Za-z._-]+$' && [ ${#version} -le 64 ] || { echo "::error::invalid version"; exit 1; }
-          case "$version" in .*) echo "::error::invalid version"; exit 1 ;; esac
-          for v in GCS_BUCKET GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
-            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::set the $v variable on the gcs-publish environment (scripts/setup-gcp.sh prints it)"; exit 1; }
-          done
-          echo "$GCS_BUCKET" | grep -Eqx '[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]' || { echo "::error::bad GCS_BUCKET"; exit 1; }
-          python3 tools/build_kit.py --tier "$tier" --frozen --check
-          { echo "tier=$tier"; echo "version=$version"; echo "dry_run=$dry_run"; } >> "$GITHUB_OUTPUT"
-          echo "Publishing tier=$tier version=$version dry_run=$dry_run"
+          sh tools/ci_inputs.sh
+          grep -qx 'tier=small' "$GITHUB_OUTPUT" || { echo "::error::the build job only builds the small tier"; exit 1; }
 
-      # ---------------- small: build here ----------------
       - name: Free disk space
-        if: steps.cfg.outputs.tier == 'small'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo docker image prune --all --force >/dev/null 2>&1 || true
@@ -97,7 +96,6 @@ jobs:
           echo "WORK=$best/kit" >> "$GITHUB_ENV"
 
       - name: Install build tools
-        if: steps.cfg.outputs.tier == 'small'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q poppler-utils
           python3 -m venv "$WORK/venv"
@@ -105,23 +103,148 @@ jobs:
           go version
 
       - name: Build small kit
-        if: steps.cfg.outputs.tier == 'small'
         env:
-          # Defence in depth: hide the OIDC request credentials from the build step.
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
-          ACTIONS_ID_TOKEN_REQUEST_URL: ""
           VERSION: ${{ steps.cfg.outputs.version }}
         run: |
           "$WORK/venv/bin/python" tools/build_kit.py --tier small --frozen --version "$VERSION" \
-            --out "$WORK/offline-toolkit-small" --cache "$WORK/cache" --zip "$WORK/kit.zip"
-          rm -rf "$WORK/cache"
+            --out "$WORK/offline-toolkit-small" --cache "$WORK/cache" --zip "$WORK/offline-toolkit-small-$VERSION.zip"
+          rm -rf "$WORK/cache" "$WORK/offline-toolkit-small"
           ls -la "$WORK"
+
+      - name: Check publishability (no upload)
+        env:
+          VERSION: ${{ steps.cfg.outputs.version }}
+        # The bucket name is an environment variable of gcs-publish, which this job deliberately cannot
+        # read; it only appears in the "target" log line. The publish job repeats this with the real one.
+        run: python3 tools/publish_gcs.py --zip "$WORK/offline-toolkit-small-$VERSION.zip" --bucket checked-in-publish-job --dry-run
+
+      - name: Hash kit zip
+        id: hash
+        env:
+          VERSION: ${{ steps.cfg.outputs.version }}
+        run: |
+          name="offline-toolkit-small-$VERSION.zip"
+          sha=$(sha256sum "$WORK/$name" | cut -d' ' -f1)
+          echo "sha256 $sha  $name"
+          { echo "zip_name=$name"; echo "zip_path=$WORK/$name"; echo "sha256=$sha"; } >> "$GITHUB_OUTPUT"
+
+      - name: Hand the zip to the publish job
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.hash.outputs.zip_path }}
+          archive: false          # upload the zip as-is (artifact name = file name); no zip-in-zip
+          if-no-files-found: error
+          retention-days: 1       # the minimum; approve the publish job within a day or re-run the workflow
+
+  # ---------------- credentials: publish small, or run Cloud Build for medium/large ----------------
+  publish:
+    needs: build
+    if: >-
+      !cancelled() &&
+      github.repository == 'cjrada/offline-toolkit' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      (needs.build.result == 'success' ||
+       (needs.build.result == 'skipped' && github.event_name == 'workflow_dispatch' && inputs.tier != 'small'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    environment: gcs-publish
+    permissions:
+      contents: read
+      id-token: write  # lets the auth step ask GitHub for an OIDC token; nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs, build outputs and configuration
+        id: cfg
+        env:
+          # small: take tier/version from the build job so both jobs agree (the default version has a date in it)
+          IN_TIER: ${{ needs.build.outputs.tier || inputs.tier }}
+          IN_VERSION: ${{ needs.build.outputs.version || inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          BUILD_DRY_RUN: ${{ needs.build.outputs.dry_run }}
+          BUILD_ZIP: ${{ needs.build.outputs.zip_name }}
+          BUILD_SHA256: ${{ needs.build.outputs.sha256 }}
+          BUILD_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          sh tools/ci_inputs.sh
+          tier=$(sed -n 's/^tier=//p' "$GITHUB_OUTPUT"); version=$(sed -n 's/^version=//p' "$GITHUB_OUTPUT")
+          dry_run=$(sed -n 's/^dry_run=//p' "$GITHUB_OUTPUT")
+          if [ "$tier" = small ]; then
+            [ "$BUILD_RESULT" = success ] || { echo "::error::small needs a successful build job"; exit 1; }
+            [ "$BUILD_DRY_RUN" = "$dry_run" ] || { echo "::error::dry_run differs between jobs"; exit 1; }
+            [ "$BUILD_ZIP" = "offline-toolkit-small-$version.zip" ] || { echo "::error::unexpected zip name from build job"; exit 1; }
+            echo "$BUILD_SHA256" | grep -Eqx '[0-9a-f]{64}' || { echo "::error::bad sha256 from build job"; exit 1; }
+            echo "$BUILD_ARTIFACT_ID" | grep -Eqx '[0-9]{1,20}' || { echo "::error::bad artifact id from build job"; exit 1; }
+          fi
+          for v in GCS_BUCKET GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
+            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::set the $v variable on the gcs-publish environment (scripts/setup-gcp.sh prints it)"; exit 1; }
+          done
+          echo "$GCS_BUCKET" | grep -Eqx '[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]' || { echo "::error::bad GCS_BUCKET"; exit 1; }
+
+      # ---------------- small: fetch and verify the build job's zip ----------------
+      - name: Make a fresh download directory
+        id: dir
+        if: steps.cfg.outputs.tier == 'small'
+        run: |
+          need=10  # GB: ~6.2 GB zip
+          best=""; bestfree=0
+          for d in /mnt "$RUNNER_TEMP"; do
+            free=$(df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc 0-9); free=${free:-0}
+            [ "$free" -gt "$bestfree" ] && { best=$d; bestfree=$free; }
+          done
+          [ "$bestfree" -ge "$need" ] || { echo "::error::only ${bestfree} GB free, need ${need} GB"; exit 1; }
+          dir="$best/kit-in-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sudo mkdir "$dir" && sudo chown "$(id -u):$(id -g)" "$dir"   # mkdir fails if it already exists
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Download kit zip from the build job
+        if: steps.cfg.outputs.tier == 'small'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ steps.dir.outputs.dir }}
+          digest-mismatch: error  # the default, stated: fail if GitHub's stored digest doesn't match
+
+      - name: Verify kit zip
+        id: zip
+        if: steps.cfg.outputs.tier == 'small'
+        env:
+          DIR: ${{ steps.dir.outputs.dir }}
+          ZIP_NAME: ${{ needs.build.outputs.zip_name }}
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+        run: |
+          ls -la "$DIR"
+          [ "$(find "$DIR" -mindepth 1 | wc -l)" -eq 1 ] && [ -f "$DIR/$ZIP_NAME" ] && [ ! -L "$DIR/$ZIP_NAME" ] \
+            || { echo "::error::expected exactly one regular file $ZIP_NAME in the artifact"; exit 1; }
+          got=$(sha256sum "$DIR/$ZIP_NAME" | cut -d' ' -f1)
+          [ "$got" = "$EXPECTED_SHA256" ] || { echo "::error::sha256 mismatch: build job $EXPECTED_SHA256, downloaded $got"; exit 1; }
+          echo "sha256 OK: $got"
+          python3 -I - "$DIR/$ZIP_NAME" "$VERSION" <<'EOF'
+          import json, sys, zipfile
+          zf = zipfile.ZipFile(sys.argv[1])
+          names = [n for n in zf.namelist() if n.count("/") == 1 and n.endswith("/KIT-INFO.json")]
+          info = json.loads(zf.read(names[0])) if len(names) == 1 else {}
+          if info.get("tier") != "small" or info.get("version") != sys.argv[2]:
+              sys.exit(f"KIT-INFO.json says tier={info.get('tier')!r} version={info.get('version')!r}")
+          EOF
+          echo "path=$DIR/$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Check publishability (no upload)
         if: steps.cfg.outputs.tier == 'small'
         env:
+          ZIP: ${{ steps.zip.outputs.path }}
           GCS_BUCKET: ${{ vars.GCS_BUCKET }}
-        run: python3 tools/publish_gcs.py --zip "$WORK/kit.zip" --bucket "$GCS_BUCKET" --dry-run
+        run: python3 tools/publish_gcs.py --zip "$ZIP" --bucket "$GCS_BUCKET" --dry-run
 
       # ---------------- Google credentials only from here on ----------------
       - name: Authenticate to Google Cloud (keyless)
@@ -138,8 +261,9 @@ jobs:
       - name: Publish small kit to GCS
         if: steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
+          ZIP: ${{ steps.zip.outputs.path }}
           GCS_BUCKET: ${{ vars.GCS_BUCKET }}
-        run: python3 tools/publish_gcs.py --zip "$WORK/kit.zip" --bucket "$GCS_BUCKET" --auth gcloud
+        run: python3 tools/publish_gcs.py --zip "$ZIP" --bucket "$GCS_BUCKET" --auth gcloud
 
       # ---------------- medium / large: Cloud Build ----------------
       - name: Build and publish ${{ steps.cfg.outputs.tier }} kit on Cloud Build
