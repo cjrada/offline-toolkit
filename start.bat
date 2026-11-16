@@ -9,6 +9,12 @@ set BIND=127.0.0.1
 if /i "%~1"=="lan" set BIND=0.0.0.0
 set "CTL=%TEMP%\offline-toolkit-control"
 set "USER_CTX=%CTX%"
+rem Thinking off by default (Qwen3 1.7B/8B otherwise burn the answer budget on hidden reasoning).
+if not defined REASONING set REASONING=off
+if /i not "%REASONING%"=="off" if /i not "%REASONING%"=="on" if /i not "%REASONING%"=="auto" (echo REASONING must be on, off or auto & pause & exit /b 1)
+rem Per-run secret for model-switch requests; only www\models.json carries it (other sites cannot read it).
+set SWITCH_TOKEN=
+for /f %%t in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"') do set "SWITCH_TOKEN=%%t"
 set "PICK=powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\pick-model.ps1" -Json www\models.json"
 set REASON=
 set PICKED=
@@ -66,5 +72,5 @@ if defined MMPROJ set MMARG=--mmproj "%MMPROJ%"
 set GPUARG=
 if defined GPU set GPUARG=--gpu %GPU%
 echo Starting AI model (%MODEL%, context %CTX%) - %REASON% ...
-start "Offline Kit - AI" /min bin\llamafile.exe --server -m "%MODEL%" %MMARG% --host %BIND% --port 8080 -c %CTX% %GPUARG%
+start "Offline Kit - AI" /min bin\llamafile.exe --server -m "%MODEL%" %MMARG% --host %BIND% --port 8080 -c %CTX% --reasoning %REASONING% %GPUARG%
 exit /b 0

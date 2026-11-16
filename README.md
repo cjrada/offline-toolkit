@@ -57,14 +57,18 @@ compare it with the first word of the `.sha256` file.
 * **Switch models from the home page** ("AI model" panel). It shows the current model, why it was
   chosen, and every bundled model marked *fits the GPU / fits RAM / tight / too big*. Clicking *Use*
   restarts the AI with that model in 10-60 s. How it works:
-  * The page uploads a one-line request to a second miniserve that listens on **127.0.0.1:8079 only**,
+  * The page uploads a small request to a second miniserve that listens on **127.0.0.1:8079 only**,
     into a private temp folder.
+  * The request must carry a random per-run token. Only `models.json` contains it, and miniserve sends no
+    CORS headers, so other websites open in the browser cannot read it and cannot forge a switch.
   * The launcher accepts it only if it names an existing model in `models/` or `models/spare/`, then
     restarts llamafile.
   * Phones in LAN mode can see the panel but cannot switch.
   * No Python is involved. llamafile 0.10.6 includes llama.cpp's multi-model "router" code, but its
     command line always loads exactly one `-m` model, so the kit restarts it instead.
-* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`.
+* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`,
+  `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
+  on hidden reasoning, and Ask-the-Manuals would look stuck.
   On Windows: `set MODEL=models\x.gguf` then `start.bat`.
 
 ## What's on the drive (prototype, ~5.1 GB)

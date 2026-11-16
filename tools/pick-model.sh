@@ -97,8 +97,8 @@ pick_model() {
 # listed, so no escaping is needed; others still work with MODEL=.
 pick_models_json() {
   _dir="${MODELS_DIR:-models}"
-  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"switch_port":8079,"models":[' \
-    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram"
+  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"switch_port":8079,"switch_token":"%s","models":[' \
+    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram" "$(printf '%s' "${SWITCH_TOKEN:-}" | tr -dc '0-9a-f')"
   _sep=""
   for _f in "$_dir"/*.gguf "$_dir"/spare/*.gguf; do
     pick_is_model "$_f" || continue

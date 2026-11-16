@@ -8,6 +8,10 @@ TMPD="${TMPDIR:-/tmp}"
 LOG="$TMPD/offline-toolkit-logs"; mkdir -p "$LOG"
 
 # Pick the biggest model that fits this computer's GPU or RAM (override: MODEL=models/x.gguf, CTX=4096).
+# Thinking is off by default: Qwen3 1.7B/8B otherwise spend their answer budget on hidden reasoning
+# and the manuals page looks stuck. Override with REASONING=on or REASONING=auto.
+REASONING="${REASONING:-off}"
+case "$REASONING" in on|off|auto) ;; *) echo "REASONING must be on, off or auto"; exit 1 ;; esac
 . "$KIT/tools/pick-model.sh"
 USER_CTX="${CTX:-}"
 pick_model || exit 1
@@ -21,6 +25,10 @@ fi
 
 PIDS=""; LLM_PID=""
 CTL="$TMPD/offline-toolkit-control-$(id -u)"   # model-switch requests land here (127.0.0.1 only)
+# Per-run secret: written only into www/models.json (other websites cannot read it - no CORS) and
+# required as the first line of every switch request, so a page on another site cannot switch models.
+SWITCH_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -dc '0-9a-f')
+export SWITCH_TOKEN
 PIDFILE="$TMPD/offline-toolkit-$(id -u).pid"; echo $$ >"$PIDFILE"
 cleanup(){ echo; echo "Stopping..."; kill $PIDS $LLM_PID 2>/dev/null; rm -rf "$CTL" "$PIDFILE"; exit 0; }
 trap cleanup INT TERM
@@ -34,7 +42,7 @@ start_llm(){
   # llamafile is an Actually Portable Executable; running it via sh works even on noexec mounts
   # and avoids binfmt/WINE hijacking on some distros.
   sh "$KIT/bin/llamafile.exe" --server -m "$MODEL" ${MMPROJ:+--mmproj "$MMPROJ"} \
-     --host "$BIND" --port 8080 -c "$CTX" ${GPU:+--gpu "$GPU"} >"$LOG/llamafile.log" 2>&1 &
+     --host "$BIND" --port 8080 -c "$CTX" --reasoning "$REASONING" ${GPU:+--gpu "$GPU"} >"$LOG/llamafile.log" 2>&1 &
   LLM_PID=$!
   write_status
 }
@@ -73,8 +81,9 @@ echo "  Press Ctrl+C here to stop everything."
 while :; do
   sleep 1
   [ -f "$CTL/switch.txt" ] || continue
-  REQ=$(head -c 200 "$CTL/switch.txt" | tr -d '\r\n'); rm -f "$CTL"/*
-  if pick_valid_request "$REQ"; then
+  TOK=$(sed -n 1p "$CTL/switch.txt" | head -c 100 | tr -d '\r')
+  REQ=$(sed -n 2p "$CTL/switch.txt" | head -c 200 | tr -d '\r'); rm -f "$CTL"/*
+  if [ -n "$SWITCH_TOKEN" ] && [ "$TOK" = "$SWITCH_TOKEN" ] && pick_valid_request "$REQ"; then
     echo "Switching model to $REQ ..."
     kill "$LLM_PID" 2>/dev/null; wait "$LLM_PID" 2>/dev/null
     MODEL="$REQ"; CTX="$USER_CTX"; pick_model && start_llm

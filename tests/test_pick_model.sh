@@ -56,10 +56,11 @@ for r in ../etc/passwd models/../x.gguf /etc/x.gguf models/qwen3-8b-q4_k_m.mmpro
 done
 
 # models.json is valid JSON and lists spare models but not projectors
-json=$(cd "$T" && RAM_MB=7800 VRAM_MB=0 sh -c ". '$HERE/tools/pick-model.sh'; pick_model && pick_models_json")
+json=$(cd "$T" && SWITCH_TOKEN='ab12<"x' RAM_MB=7800 VRAM_MB=0 sh -c ". '$HERE/tools/pick-model.sh'; pick_model && pick_models_json")
 echo "$json" | python3 -c '
 import json,sys; d=json.load(sys.stdin); names=[m["name"] for m in d["models"]]
 assert d["current"].endswith("qwen3-4b-instruct-2507-q4_k_m.gguf"), d["current"]
+assert d["switch_token"] == "ab12", d["switch_token"]   # only hex survives, so the JSON stays valid
 assert "tiny" in names and not any("mmproj" in n for n in names), names
 assert {m["name"]: m["fit"] for m in d["models"]}["qwen3-8b-q4_k_m"] == "tight"
 assert {m["name"]: m["vision"] for m in d["models"]}["qwen3-8b-q4_k_m"] is True

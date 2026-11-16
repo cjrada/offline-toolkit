@@ -5,8 +5,8 @@
 # models\spare\ is never auto-picked. models\x.gguf pairs with models\x.mmproj.gguf (vision projector).
 # Prints KEY=VALUE lines (MODEL, MMPROJ, CTX, REASON) for start.bat. Respects $env:MODEL / CTX / GPU.
 #   -Json FILE         also write the home page's www\models.json
-#   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server), validate it,
-#                      and pick that model; exit 1 if it is not an existing model under models\
+#   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server): line 1 must equal
+#                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\; else exit 1
 param([string]$Json = '', [string]$RequestFile = '')
 $ErrorActionPreference = 'Stop'
 $kit = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -57,8 +57,11 @@ function Models($dir) {
 $ctx = $env:CTX
 $model = $env:MODEL
 if ($RequestFile) {
-  $req = ''
-  try { $req = ((Get-Content -LiteralPath $RequestFile -TotalCount 1 -ErrorAction Stop) | Out-String).Trim() } catch {}
+  $lines = @()
+  try { $lines = @(Get-Content -LiteralPath $RequestFile -TotalCount 2 -ErrorAction Stop) } catch {}
+  $tok = if ($lines.Count -ge 1) { ([string]$lines[0]).Trim() } else { '' }
+  $req = if ($lines.Count -ge 2) { ([string]$lines[1]).Trim() } else { '' }
+  if (-not $env:SWITCH_TOKEN -or $tok -cne $env:SWITCH_TOKEN) { [Console]::Error.WriteLine('bad or missing switch token'); exit 1 }
   if ($req -notmatch '^models/(spare/)?[A-Za-z0-9._-]+\.gguf$' -or $req -match '\.\.' -or $req -match 'mmproj') {
     [Console]::Error.WriteLine('invalid model-switch request'); exit 1 }
   $model = $req -replace '/', '\'
@@ -96,7 +99,7 @@ if ($Json) {
     }
   }
   $o = [ordered]@{ current = ($model -replace '\\', '/'); ctx = [int]$ctx; reason = $reason; ram_mb = $ramMB; vram_mb = $vramMB;
-                   switch_port = 8079; models = $list }
+                   switch_port = 8079; switch_token = ($env:SWITCH_TOKEN -replace '[^0-9a-f]', ''); models = $list }
   try { [IO.File]::WriteAllText((Join-Path $kit $Json), (ConvertTo-Json $o -Depth 4 -Compress)) } catch {}
 }
 "MODEL=$model"

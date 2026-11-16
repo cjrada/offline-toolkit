@@ -52,9 +52,13 @@ fi
 say "Project $PROJECT_ID"
 if ! exists gcloud projects describe "$PROJECT_ID"; then
   if [ "$CREATE_PROJECT" = 1 ]; then
-    run gcloud projects create "$PROJECT_ID" --name="Offline toolkit"
+    run gcloud projects create "$PROJECT_ID" --name="Offline toolkit" || {
+      echo "Could not create project $PROJECT_ID. Project IDs are global across all of Google Cloud, so the" >&2
+      echo "default is probably taken: try e.g. bash $0 offline-toolkit-$(date +%y%m)-$RANDOM --create-project ..." >&2
+      exit 1; }
   elif [ "$DRY" = 0 ]; then
-    echo "project $PROJECT_ID not found (add --create-project to create it)" >&2; exit 1
+    echo "project $PROJECT_ID not found or not yours (add --create-project to create it; project IDs are" >&2
+    echo "global, so pick a unique one such as offline-toolkit-<suffix>)" >&2; exit 1
   fi
 fi
 if [ -n "$BILLING" ]; then run gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING"; fi
@@ -126,6 +130,9 @@ WIF="projects/$PROJECT_NUM/locations/global/workloadIdentityPools/$POOL/provider
 cat <<EOF
 
 == Done. Now configure GitHub (no secrets needed - these values are not sensitive)
+
+Cloud Shell may not have the GitHub CLI (gh). Everything below can also be done in the web UI:
+https://github.com/$REPO/settings/environments -> gcs-publish (create it, then "Add environment variable").
 
 1. Create the protected environment (repo admin). Either use Settings -> Environments -> New environment
    "$ENV_NAME": Required reviewers = Chris (cjrada); Deployment branches and tags = Selected:

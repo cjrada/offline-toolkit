@@ -1,6 +1,8 @@
 // Home-page model switcher. The launcher writes models.json (current model, why, and every bundled model
 // with whether it fits this computer). Switching uploads a one-line request to a control server that
 // listens on 127.0.0.1:8079 only, so it works from the laptop itself but not from phones on the LAN.
+// The request carries the per-run token from models.json; other websites cannot read that file (no CORS),
+// so they cannot forge a switch.
 (async () => {
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -19,7 +21,7 @@
   $("modelRows").onclick = async e => {
     const b = e.target.closest("button[data-p]"); if (!b) return;
     if (b.dataset.fit === "too-big" && !confirm("This model is bigger than this computer's memory. It may be extremely slow or fail. Try anyway?")) return;
-    const fd = new FormData(); fd.append("file_to_upload", new Blob([b.dataset.p], {type: "text/plain"}), "switch.txt");
+    const fd = new FormData(); fd.append("file_to_upload", new Blob([`${info.switch_token || ""}\n${b.dataset.p}\n`], {type: "text/plain"}), "switch.txt");
     $("curModel").textContent = "switching to " + name(b.dataset.p) + "…";
     try { await fetch("http://127.0.0.1:8079/upload?path=/", {method: "POST", body: fd, mode: "no-cors"}); }
     catch { $("curModel").textContent = "could not reach the switch service (is start.sh / start.bat still running?)"; return; }

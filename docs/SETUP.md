@@ -17,10 +17,14 @@ Open [Cloud Shell](https://shell.cloud.google.com) as a project owner, clone the
 
 ```sh
 git clone https://github.com/cjrada/offline-toolkit && cd offline-toolkit
-bash scripts/setup-gcp.sh                       # project "offline-toolkit", bucket "offline-toolkit-kits"
-# or: bash scripts/setup-gcp.sh my-project --create-project --billing-account 0X0X0X-0X0X0X-0X0X0X
+bash scripts/setup-gcp.sh my-existing-project      # bucket "<project>-kits"
+# or create one: bash scripts/setup-gcp.sh offline-toolkit-<suffix> --create-project --billing-account 0X0X0X-0X0X0X-0X0X0X
 # preview without changing anything: add --dry-run
 ```
+
+**Project IDs are global** across all of Google Cloud, so the default `offline-toolkit` is almost certainly
+taken. Pass an existing project of yours, or a unique new ID such as `offline-toolkit-2611` with
+`--create-project`. The script prints this hint if creation fails.
 
 You can re-run it at any time. It only creates what is missing and resets the security settings. It sets up:
 
@@ -61,7 +65,10 @@ At the end the script prints the exact `gh` commands for step 2.
    * *Deployment branches and tags*: **Selected** → branch `main` and tag `v*`.
 
    Or use the `gh api` commands the script printed.
-2. **Environment variables.** These are not secrets and nothing here is sensitive. Paste the three lines the script printed:
+2. **Environment variables.** These are not secrets and nothing here is sensitive. Paste the three lines the
+   script printed into any shell where `gh` is logged in. **Cloud Shell may not have `gh`.** In that case use
+   the web UI: Settings → Environments → **gcs-publish** → *Add environment variable*, once each for
+   `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT` and `GCS_BUCKET`, with the values the script printed:
    ```sh
    gh variable set GCP_WIF_PROVIDER    --env gcs-publish --body "projects/<num>/locations/global/workloadIdentityPools/github/providers/offline-toolkit" -R cjrada/offline-toolkit
    gh variable set GCP_SERVICE_ACCOUNT --env gcs-publish --body "kit-publisher@<project>.iam.gserviceaccount.com" -R cjrada/offline-toolkit
