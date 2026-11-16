@@ -18,8 +18,38 @@ No install, no internet, no accounts. Everything runs on `localhost` in your web
 * **Linux:** `sh start.sh` (or `sh start.sh lan`). Ctrl+C or `sh stop.sh` to stop.
   Works even if the drive is mounted `noexec` (it runs llamafile via `sh` and copies the two small static binaries to /tmp).
 * Then open <http://localhost:8000/>. The AI needs ~10-60 s to load (longer from a slow USB stick).
-* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`.
+* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`, `VISION=1`.
   On Windows: `set MODEL=models\x.gguf` then `start.bat`.
+
+### Model selection (automatic)
+The launchers pick the **biggest model in `models/` that fits this laptop's RAM** (`tools/pick-model.sh`,
+`tools/pick-model.ps1` on Windows). RAM needed ≈ model file (+ vision projector) + context cache
+(~1.5 GB at 8k tokens) + ~2 GB for the OS/browser. If nothing fits, the context is shrunk to 4k/2k, and
+as a last resort the smallest model is used with a warning. So one drive works on a 4 GB netbook
+(Qwen3-1.7B), an 8 GB laptop (Qwen3-4B), 16 GB (Qwen3-8B) and 32 GB (Qwen3-30B-A3B).
+* Plain text models are preferred; `VISION=1` prefers a vision model. A vision model's projector must be
+  named `<model>-mmproj-*.gguf` next to it (e.g. `gemma-3-4b-it-q4_k_m.gguf` +
+  `gemma-3-4b-it-q4_k_m-mmproj-f16.gguf`).
+* `models/spare/` is never auto-picked (e.g. "uncensored" models) - use `MODEL=`.
+* See what it would choose: `sh tools/pick-model.sh` (pretend: `KIT_RAM_MB=4096 sh tools/pick-model.sh`).
+
+## Building a kit (`tools/build-kit.sh`)
+On an internet-connected Linux box (needs `curl python3 tar unzip zip openssl pdftotext`; `go` for the map):
+
+```sh
+bash tools/build-kit.sh --tier small        # base | small | medium | large
+# -> dist/small/offline-survival-kit/  (copy its contents to the drive) + .zip + SHA256SUMS
+```
+Every download is verified against a SHA-256 - pinned in `tools/kit.lock`, otherwise the publisher's own
+checksum (Hugging Face, Kiwix, GitHub release digests, npm integrity); anything without one is flagged.
+`--strict` accepts pinned hashes only; `--update` re-resolves newest versions and writes a new lock to review.
+Other flags: `--skip-map`, `--no-zip`, `--map-build YYYYMMDD`, `--with-uncensored`, `--with-post-disaster`
+(personal use only - marks the kit not redistributable). Manuals come from `tools/sources/pdfs.tsv`; PDFs
+without a stable official URL there are copied from your local `www/docs/pdf/` if present.
+Each kit has `KIT-INFO.txt` (sources + build warnings) and `SHA256SUMS` (check the drive: `sha256sum -c SHA256SUMS`).
+
+**Prebuilt kits** (small, base) are published by CI to Google Cloud Storage - see `docs/publishing.md`
+for the download layout and the (keyless, reviewer-gated) security setup.
 
 ## What's on the drive (prototype, ~5.1 GB)
 
@@ -34,7 +64,9 @@ www/index.html               home page
 www/docs/                    Ask-the-Manuals (RAG): index.js (prebuilt), rag.js, pdf/, notes/, lib/pdf.js
 www/maps/                    australia.pmtiles (2.2 GB, all of Australia to street level) + MapLibre viewer, fonts, sprites
 tools/build_index.py         rebuild the manuals index (needs python3 + pdftotext; only for rebaking)
-tools/download-extras.sh     commented download list for the Medium/Large tiers
+tools/build-kit.sh           build a whole tier from the publishers, checksum-verified (see below)
+tools/pick-model.sh / .ps1   automatic model choice by RAM (used by start.sh / start.bat)
+tools/download-extras.sh     commented download list for hand-picking extras
 ```
 
 ### Ask the Manuals (RAG) - how it works
@@ -112,4 +144,5 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   * llamafile (Apache-2.0), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
   * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
   * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`--with-post-disaster`) and is never published in built kits.
+* Published kits contain only redistributable items; each zip's `KIT-INFO.txt` lists every source URL.
 * `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.

@@ -14,5 +14,14 @@ jobs:
           persist-credentials: false
       - name: shellcheck
         run: shellcheck -S warning start.sh stop.sh tools/*.sh
+      - name: model picker smoke test
+        run: |
+          set -eu
+          k=$(mktemp -d); mkdir -p "$k/models"
+          truncate -s 2500M "$k/models/a-4b.gguf"; truncate -s 1100M "$k/models/b-1.7b.gguf"
+          KIT_RAM_MB=7800 sh tools/pick-model.sh "$k" | grep -qx 'MODEL=models/a-4b.gguf'
+          KIT_RAM_MB=3800 sh tools/pick-model.sh "$k" | grep -qx 'MODEL=models/b-1.7b.gguf'
+      - name: build-kit options
+        run: bash tools/build-kit.sh --help >/dev/null
       - name: python syntax
         run: python3 -m py_compile tools/build_index.py

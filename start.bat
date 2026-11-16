@@ -4,11 +4,20 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 set BIND=127.0.0.1
 if /i "%~1"=="lan" set BIND=0.0.0.0
+rem Auto-pick the biggest model that fits this PC's RAM (override: set MODEL=..., set CTX=..., set VISION=1).
+set "PICKPROJ=" & set "PICK="
+for /f "usebackq tokens=1-4 delims=|" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\pick-model.ps1"`) do (
+  set "MODEL=%%a" & set "PICKPROJ=%%b" & set "CTX=%%c" & set "PICK=%%d")
+if "%PICK%"=="" (
+  rem PowerShell unavailable: fall back to the first model in models\
+  for %%m in (models\*.gguf) do (echo %%m | findstr /i mmproj >nul || if "!MODEL!"=="" set "MODEL=%%m")
+  set "PICK=first model found (auto-pick unavailable)"
+)
 if "%CTX%"=="" set CTX=8192
-for %%m in (models\*.gguf) do (echo %%m | findstr /i mmproj >nul || if "!MODEL!"=="" set "MODEL=%%m")
 if "%MODEL%"=="" (echo No .gguf model found in models\ & pause & exit /b 1)
 set MMPROJ=
-for %%m in (models\*mmproj*.gguf) do set "MMPROJ=--mmproj %%m"
+if not "%PICKPROJ%"=="" if not "%PICKPROJ%"=="-" set MMPROJ=--mmproj "%PICKPROJ%"
+echo Model: %MODEL% (context %CTX%) - %PICK%
 set ZIMS=
 for %%z in (library\*.zim) do set ZIMS=!ZIMS! "%%z"
 echo Starting AI model (%MODEL%) ...

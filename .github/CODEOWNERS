@@ -1,0 +1,6 @@
+# Changes to CI, the build/publish pipeline and pinned download hashes need owner review.
+*                       @cjrada
+/.github/               @cjrada
+/tools/                 @cjrada
+/tools/kit.lock         @cjrada
+/tools/sources/         @cjrada

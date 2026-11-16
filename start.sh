@@ -6,10 +6,11 @@ KIT="$(cd "$(dirname "$0")" && pwd)"; cd "$KIT" || exit 1
 BIND=127.0.0.1; [ "$1" = "lan" ] && BIND=0.0.0.0
 LOG="${TMPDIR:-/tmp}/offline-toolkit-logs"; mkdir -p "$LOG"
 
-MODEL="${MODEL:-$(ls models/*.gguf 2>/dev/null | grep -v -i mmproj | head -1)}"
-[ -n "$MODEL" ] || { echo "No .gguf model in models/"; exit 1; }
-MMPROJ=$(ls models/*mmproj*.gguf 2>/dev/null | head -1)
-CTX="${CTX:-8192}"
+# Auto-pick the biggest model that fits this laptop's RAM (override: MODEL=..., CTX=..., VISION=1).
+# shellcheck source=tools/pick-model.sh
+. "$KIT/tools/pick-model.sh"
+pick_model "$KIT" || exit 1
+echo "Model: $MODEL (context $CTX) - $PICK_REASON"
 
 # Static Linux binaries; if the drive won't let us execute, run copies from /tmp.
 BIN="$KIT/bin/linux"

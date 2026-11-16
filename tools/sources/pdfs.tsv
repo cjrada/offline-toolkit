@@ -1,0 +1,9 @@
+# Manuals baked into Ask-the-Manuals. file<TAB>url (https only). Hashes are pinned in tools/kit.lock.
+# "-" = no stable official URL known yet: drop the PDF into www/docs/pdf/ locally (git-ignored) or
+# add a URL here in a reviewed commit. Titles shown in the app come from www/docs/pdf/titles.json.
+# Prefer official hosts (.gov / .mil / fas.org) over mirrors.
+Ready-gov-Are-You-Ready.pdf	https://www.ready.gov/sites/default/files/2021-03/are-you-ready-guide.pdf
+US-Army-FM-4-25-11-First-Aid.pdf	https://irp.fas.org/doddir/milmed/first.pdf
+FM21-76-US-Army-Survival-Manual.pdf	-
+USMC-Wilderness-Medicine-Course.pdf	-
+WA-DoH-Purifying-Water-in-an-Emergency.pdf	-

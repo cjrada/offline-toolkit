@@ -1,0 +1,185 @@
+# Build a kit from pinned sources (tools/kit.lock) and publish it to a public Google Cloud Storage bucket.
+#
+# Security model (public repository) - see docs/publishing.md:
+#  * Never runs for pull requests or forks; only manual dispatch from main, or a kit-v* tag push.
+#  * No long-lived keys: the publish job gets a short-lived Google token through Workload Identity
+#    Federation (GitHub OIDC). GCP only trusts tokens whose subject is this repo's "gcs-publish"
+#    environment, which is restricted to main/kit-v* tags and needs a reviewer's approval.
+#  * The build job (which downloads and unpacks third-party files) has NO cloud access and only
+#    read access to the repo. The publish job runs no third-party code: it verifies checksums and
+#    uploads with the gcloud CLI preinstalled on the runner.
+#  * --strict: every downloaded file must match a SHA-256 pinned in tools/kit.lock (reviewed in git).
+#  * Objects are write-once (if-generation-match=0); only kits/<tier>/latest.json is overwritten.
+#  * All actions are pinned to full commit SHAs; inputs reach shell only through env vars.
+name: publish-kit
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Kit tier to build and publish
+        type: choice
+        options: [small, base]
+        default: small
+      version:
+        description: Version label (letters, digits, . _ -). Empty = today's UTC date.
+        type: string
+        required: false
+  push:
+    tags: ['kit-v*']
+
+permissions: {}
+
+concurrency:
+  group: publish-kit
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'cjrada/offline-toolkit' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/kit-v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    outputs:
+      tier: ${{ steps.params.outputs.tier }}
+      version: ${{ steps.params.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate parameters
+        id: params
+        env:
+          IN_TIER: ${{ inputs.tier }}
+          IN_VERSION: ${{ inputs.version }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = push ]; then tier=small; version=${REF_NAME#kit-v}
+          else tier=${IN_TIER:-small}; version=${IN_VERSION:-$(date -u +%Y.%m.%d)}; fi
+          case $tier in small|base) ;; *) echo "::error::bad tier"; exit 1 ;; esac
+          [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "::error::bad version"; exit 1; }
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"; echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space (kit + zip need ~15 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils zip unzip
+          command -v go || sudo apt-get install -y -qq golang-go
+
+      - name: Build kit (strict - pinned hashes only)
+        env:
+          TIER: ${{ steps.params.outputs.tier }}
+          VERSION: ${{ steps.params.outputs.version }}
+        run: bash tools/build-kit.sh --tier "$TIER" --version "$VERSION" --strict --out "$RUNNER_TEMP/dist"
+
+      - name: Keep only the publishable files
+        env:
+          TIER: ${{ steps.params.outputs.tier }}
+        run: |
+          set -euo pipefail
+          d=$RUNNER_TEMP/dist/$TIER; mkdir -p "$RUNNER_TEMP/out"
+          mv "$d"/*.zip "$d/SHA256SUMS" "$d/manifest.json" "$d/kit.lock" "$RUNNER_TEMP/out/"
+          rm -rf "$RUNNER_TEMP/dist"
+          ls -la "$RUNNER_TEMP/out"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kit
+          path: ${{ runner.temp }}/out/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.repository == 'cjrada/offline-toolkit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: gcs-publish   # protection rules: required reviewer, deployment refs main + kit-v*
+    permissions:
+      id-token: write          # OIDC token for Workload Identity Federation - nothing else
+    env:
+      TIER: ${{ needs.build.outputs.tier }}
+      VERSION: ${{ needs.build.outputs.version }}
+      WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}   # projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+      BUCKET: ${{ vars.GCS_BUCKET }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kit
+          path: ${{ runner.temp }}/kit
+
+      - name: Verify artifact
+        working-directory: ${{ runner.temp }}/kit
+        run: |
+          set -euo pipefail
+          [[ $WIF_PROVIDER =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]] \
+            || { echo "::error::set environment variable GCP_WIF_PROVIDER (see docs/publishing.md)"; exit 1; }
+          [[ $BUCKET =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]] || { echo "::error::set environment variable GCS_BUCKET"; exit 1; }
+          ls -la
+          sha256sum -c SHA256SUMS
+          zip=$(cut -c67- SHA256SUMS)
+          [[ $zip == "offline-survival-kit-$TIER-$VERSION.zip" ]] || { echo "::error::unexpected file $zip"; exit 1; }
+          python3 -c 'import json,sys; m=json.load(open("manifest.json")); sys.exit(0 if m["redistributable"] is True else "kit is marked not redistributable")'
+          if unzip -Z1 "$zip" | grep -iE 'NOT-FOR-REDISTRIBUTION|post-disaster'; then
+            echo "::error::kit contains non-redistributable content"; exit 1; fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation, no keys)
+        run: |
+          set -euo pipefail
+          aud="//iam.googleapis.com/$WIF_PROVIDER"           # STS audience
+          jwt_aud="https://iam.googleapis.com/$WIF_PROVIDER" # default allowed audience of a WIF provider
+          jwt=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                  "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$jwt_aud")" \
+                | python3 -c 'import json,sys;print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$jwt"
+          umask 077
+          printf '%s' "$jwt" > "$RUNNER_TEMP/oidc.jwt"
+          python3 - "$aud" "$RUNNER_TEMP/oidc.jwt" > "$RUNNER_TEMP/gcp-wif.json" <<'EOF'
+          import json, sys
+          print(json.dumps({"type": "external_account", "audience": sys.argv[1],
+                            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                            "token_url": "https://sts.googleapis.com/v1/token",
+                            "credential_source": {"file": sys.argv[2], "format": {"type": "text"}}}))
+          EOF
+          export CLOUDSDK_CONFIG=$RUNNER_TEMP/gcloud
+          gcloud auth login --cred-file="$RUNNER_TEMP/gcp-wif.json" --quiet
+          # Composite uploads need delete rights on temp objects; the publisher may only create.
+          gcloud config set storage/parallel_composite_upload_enabled False --quiet
+          echo "CLOUDSDK_CONFIG=$CLOUDSDK_CONFIG" >> "$GITHUB_ENV"
+
+      - name: Upload to gs://${{ vars.GCS_BUCKET }}/kits/
+        working-directory: ${{ runner.temp }}/kit
+        run: |
+          set -euo pipefail
+          dest="gs://$BUCKET/kits/$TIER/$VERSION"
+          zip=$(cut -c67- SHA256SUMS)
+          # Write-once: fails if this version already exists (pick a new version label).
+          gcloud storage cp --if-generation-match=0 "$zip" SHA256SUMS manifest.json kit.lock "$dest/"
+          python3 - "$BUCKET" "$TIER" "$VERSION" > latest.json <<'EOF'
+          import json, sys
+          b, t, v = sys.argv[1:]
+          m = json.load(open("manifest.json"))
+          base = f"https://storage.googleapis.com/{b}/kits/{t}/{v}/"
+          m.update(url=base + m["name"], sha256sums=base + "SHA256SUMS", lock=base + "kit.lock")
+          print(json.dumps(m, indent=1))
+          EOF
+          gcloud storage cp --cache-control="no-cache, max-age=60" latest.json "gs://$BUCKET/kits/$TIER/latest.json"
+          {
+            echo "### Published $TIER $VERSION"
+            echo "https://storage.googleapis.com/$BUCKET/kits/$TIER/$VERSION/$zip"
+            echo; echo '```'; cat SHA256SUMS; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oidc.jwt" "$RUNNER_TEMP/gcp-wif.json" "$RUNNER_TEMP/gcloud"
