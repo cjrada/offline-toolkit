@@ -1,6 +1,9 @@
 #!/bin/sh
 # Optional: grow the kit to the Medium / Large tier. Run on an internet-connected Linux box from the kit folder.
 # Nothing here runs automatically. Uncomment what you want. Sizes are approximate (Nov 2026).
+# Prefer `python3 tools/build_kit.py --tier medium|large`: same files, but hash-checked. This list is for one-offs.
+# Auto model selection uses the biggest models/*.gguf that fits the laptop's RAM; models/spare/ is manual-only.
+# shellcheck disable=SC2034  # HF/KZ are used by the commented-out lines
 HF=https://huggingface.co; KZ=https://download.kiwix.org/zim
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p models/spare library
@@ -8,9 +11,9 @@ mkdir -p models/spare library
 # curl -L -o models/spare/qwen3-1.7b-q4_k_m.gguf  $HF/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf            # 1.1 GB, old laptops
 # curl -L -o models/spare/qwen3-8b-q4_k_m.gguf    $HF/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf                # 5.0 GB, 16 GB RAM
 # curl -L -o models/spare/qwen3-30b-a3b-instruct-2507-q4_k_m.gguf $HF/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/main/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf  # 18.6 GB, 32 GB RAM
-# Vision (photo questions): model + its mmproj file must be used together (--mmproj). 
+# Vision (photo questions): the projector must be named <model>.mmproj.gguf next to the model; start.sh pairs them.
 # curl -L -o models/spare/gemma-3-4b-it-q4_k_m.gguf $HF/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf     # 2.5 GB
-# curl -L -o models/spare/gemma-3-4b-mmproj-f16.gguf $HF/unsloth/gemma-3-4b-it-GGUF/resolve/main/mmproj-F16.gguf             # 0.85 GB
+# curl -L -o models/spare/gemma-3-4b-it-q4_k_m.mmproj.gguf $HF/unsloth/gemma-3-4b-it-GGUF/resolve/main/mmproj-F16.gguf             # 0.85 GB
 # "Uncensored" (fewer refusals, NOT more accurate):
 # curl -L -o models/spare/dolphin3-llama3.1-8b-q4_k_m.gguf $HF/bartowski/Dolphin3.0-Llama3.1-8B-GGUF/resolve/main/Dolphin3.0-Llama3.1-8B-Q4_K_M.gguf  # 4.9 GB
 ## ---- Library (Kiwix ZIMs). Check $KZ/<folder>/ for the newest date and replace it below.

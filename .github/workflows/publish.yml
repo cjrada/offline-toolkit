@@ -1,0 +1,171 @@
+# Build a kit from the hash-pinned manifest and publish it to Google Cloud Storage.
+#   small         -> built on this GitHub runner, uploaded from here.
+#   medium/large  -> too big for a runner: submitted to Cloud Build (cloudbuild.yaml, 600 GB disk).
+#
+# Safe for a PUBLIC repository:
+#  * Runs only on a v* tag push or a manual run, and only on refs/heads/main or refs/tags/v*.
+#    There are no pull_request / pull_request_target / issue triggers, so forks never reach it.
+#  * The job uses the `gcs-publish` environment (required reviewer; deployment refs: main and v* tags).
+#  * No secrets. GitHub's OIDC token goes through Workload Identity Federation to impersonate the
+#    kit-publisher service account. Google accepts it only for this repository id and name, main or v*
+#    tags, and the gcs-publish environment (scripts/setup-gcp.sh).
+#  * Every download is sha256- or git-commit-pinned (--frozen) and none of it is executed. Google
+#    credentials are created only after the build, in the steps that upload.
+#  * Inputs reach the shell only through env and are validated against strict patterns.
+#  * Actions and container images are pinned to full SHAs/digests.
+name: publish-kit
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Kit tier"
+        type: choice
+        options: [small, medium, large]
+        default: small
+      version:
+        description: "Version label (default: yyyymmdd-<commit>); letters, digits, . _ -"
+        type: string
+        default: ""
+      dry_run:
+        description: "Build and check, but do not upload"
+        type: boolean
+        default: true
+permissions: {}
+concurrency:
+  group: publish-kit-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'cjrada/offline-toolkit' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    environment: gcs-publish
+    permissions:
+      contents: read
+      id-token: write  # lets the auth step ask GitHub for an OIDC token; nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs and configuration
+        id: cfg
+        env:
+          IN_TIER: ${{ inputs.tier }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          tier="${IN_TIER:-small}"
+          version="$IN_VERSION"
+          if [ -z "$version" ]; then
+            if [ "$EVENT" = push ]; then version="$REF_NAME"; else version="$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)"; fi
+          fi
+          dry_run=false; [ "$EVENT" = workflow_dispatch ] && [ "$IN_DRY_RUN" = true ] && dry_run=true
+          echo "$tier" | grep -Eqx '^(small|medium|large)$' || { echo "::error::invalid tier"; exit 1; }
+          echo "$version" | grep -Eqx '^[0-9A-Za-z._-]+$' && [ ${#version} -le 64 ] || { echo "::error::invalid version"; exit 1; }
+          case "$version" in .*) echo "::error::invalid version"; exit 1 ;; esac
+          for v in GCS_BUCKET GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
+            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::set the $v variable on the gcs-publish environment (scripts/setup-gcp.sh prints it)"; exit 1; }
+          done
+          echo "$GCS_BUCKET" | grep -Eqx '[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]' || { echo "::error::bad GCS_BUCKET"; exit 1; }
+          python3 tools/build_kit.py --tier "$tier" --frozen --check
+          { echo "tier=$tier"; echo "version=$version"; echo "dry_run=$dry_run"; } >> "$GITHUB_OUTPUT"
+          echo "Publishing tier=$tier version=$version dry_run=$dry_run"
+
+      # ---------------- small: build here ----------------
+      - name: Free disk space
+        if: steps.cfg.outputs.tier == 'small'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          need=25  # GB: ~6.2 GB kit + same again for the zip + downloads in flight
+          best=""; bestfree=0
+          for d in /mnt "$RUNNER_TEMP"; do
+            free=$(df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc 0-9); free=${free:-0}
+            [ "$free" -gt "$bestfree" ] && { best=$d; bestfree=$free; }
+          done
+          df -h / /mnt || true
+          [ "$bestfree" -ge "$need" ] || { echo "::error::only ${bestfree} GB free, need ${need} GB"; exit 1; }
+          sudo mkdir -p "$best/kit" && sudo chown "$(id -u):$(id -g)" "$best/kit"
+          echo "WORK=$best/kit" >> "$GITHUB_ENV"
+
+      - name: Install build tools
+        if: steps.cfg.outputs.tier == 'small'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q poppler-utils
+          python3 -m venv "$WORK/venv"
+          "$WORK/venv/bin/pip" install -q --require-hashes --only-binary :all: -r tools/requirements-build.txt
+          go version
+
+      - name: Build small kit
+        if: steps.cfg.outputs.tier == 'small'
+        env:
+          # Defence in depth: hide the OIDC request credentials from the build step.
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          VERSION: ${{ steps.cfg.outputs.version }}
+        run: |
+          "$WORK/venv/bin/python" tools/build_kit.py --tier small --frozen --version "$VERSION" \
+            --out "$WORK/offline-toolkit-small" --cache "$WORK/cache" --zip "$WORK/kit.zip"
+          rm -rf "$WORK/cache"
+          ls -la "$WORK"
+
+      - name: Check publishability (no upload)
+        if: steps.cfg.outputs.tier == 'small'
+        env:
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+        run: python3 tools/publish_gcs.py --zip "$WORK/kit.zip" --bucket "$GCS_BUCKET" --dry-run
+
+      # ---------------- Google credentials only from here on ----------------
+      - name: Authenticate to Google Cloud (keyless)
+        if: steps.cfg.outputs.dry_run != 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        if: steps.cfg.outputs.dry_run != 'true'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Publish small kit to GCS
+        if: steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
+        env:
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+        run: python3 tools/publish_gcs.py --zip "$WORK/kit.zip" --bucket "$GCS_BUCKET" --auth gcloud
+
+      # ---------------- medium / large: Cloud Build ----------------
+      - name: Build and publish ${{ steps.cfg.outputs.tier }} kit on Cloud Build
+        if: steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
+        env:
+          TIER: ${{ steps.cfg.outputs.tier }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          COMMIT: ${{ github.sha }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          project="${GCP_SERVICE_ACCOUNT#*@}"; project="${project%.iam.gserviceaccount.com}"
+          id=$(gcloud builds submit --project "$project" --no-source --config cloudbuild.yaml --async --format='value(id)' \
+                 --substitutions "_TIER=$TIER,_VERSION=$VERSION,_COMMIT=$COMMIT,_BUCKET=$GCS_BUCKET")
+          echo "Cloud Build $id started"
+          while :; do
+            status=$(gcloud builds describe "$id" --project "$project" --format='value(status)')
+            case "$status" in
+              SUCCESS) echo "Cloud Build $id succeeded"; break ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) echo "::error::Cloud Build $id ended with $status"; exit 1 ;;
+            esac
+            sleep 60
+          done
+
+      - name: Dry run summary
+        if: steps.cfg.outputs.dry_run == 'true'
+        env:
+          TIER: ${{ steps.cfg.outputs.tier }}
+        run: echo "Dry run for $TIER - nothing uploaded. Medium/large dry runs only validate inputs and pins."

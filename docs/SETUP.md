@@ -1,0 +1,160 @@
+# Setup: building, publishing and downloading kits
+
+Kits are built from `tools/kit-manifest.json` and stored in a **private** Google Cloud Storage bucket.
+This repository is public, so publishing uses **no stored secrets**. GitHub Actions proves who it is with a
+short-lived OIDC token, and Google accepts that token only for this repository, `main` or a `v*` tag, and
+jobs in the protected `gcs-publish` environment (Workload Identity Federation).
+
+| Tier | Built on | Size (approx.) | How |
+|---|---|---|---|
+| small | GitHub runner | 6 GB | `publish-kit` workflow, or push a `v*` tag |
+| medium | Cloud Build (600 GB disk) | 40 GB | `publish-kit` workflow, tier = medium |
+| large | Cloud Build (600 GB disk) | 175 GB | `publish-kit` workflow, tier = large |
+
+## 1. One-time Google Cloud setup
+
+Open [Cloud Shell](https://shell.cloud.google.com) as a project owner, clone the repo and run:
+
+```sh
+git clone https://github.com/cjrada/offline-toolkit && cd offline-toolkit
+bash scripts/setup-gcp.sh my-existing-project      # bucket "<project>-kits"
+# or create one: bash scripts/setup-gcp.sh offline-toolkit-<suffix> --create-project --billing-account 0X0X0X-0X0X0X-0X0X0X
+# preview without changing anything: add --dry-run
+```
+
+**Project IDs are global** across all of Google Cloud, so the default `offline-toolkit` is almost certainly
+taken. Pass an existing project of yours, or a unique new ID such as `offline-toolkit-2611` with
+`--create-project`. The script prints this hint if creation fails.
+
+You can re-run it at any time. It only creates what is missing and resets the security settings. It sets up:
+
+* **APIs:** storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager and logging.
+* **Bucket `<project>-kits`** in `australia-southeast1`:
+  * uniform bucket-level access;
+  * **public access prevention enforced**;
+  * 7-day soft delete (an undo window);
+  * any `allUsers`/`allAuthenticatedUsers` binding is removed. Kits are private.
+* **Workload Identity pool `github`, provider `offline-toolkit`.** Tokens are accepted only when *all* of these hold:
+  * `repository_id` is this repo's numeric id, so a deleted and re-created repo with the same name doesn't qualify;
+  * `repository == 'cjrada/offline-toolkit'`;
+  * `ref` is `refs/heads/main` or starts with `refs/tags/v`;
+  * `environment == 'gcs-publish'`.
+* **Service accounts.** Neither has a key.
+  * `kit-publisher`: the workflow impersonates it.
+  * `kit-builder`: Cloud Build runs as it.
+* **Grants (least privilege):**
+
+  | Who | Role | On | Allows |
+  |---|---|---|---|
+  | both SAs | `storage.objectCreator` | bucket | create objects; no replace, no delete |
+  | both SAs | `storage.objectUser`, IAM condition `kits/…/latest.json` | bucket | update the "latest" pointers only |
+  | kit-publisher | `cloudbuild.builds.editor`, `serviceusage.serviceUsageConsumer` | project | start builds and check their status |
+  | kit-publisher | `iam.serviceAccountUser` | kit-builder | builds can only run as kit-builder |
+  | kit-builder | `logging.logWriter` | project | build logs (`CLOUD_LOGGING_ONLY`) |
+  | GitHub principal set (this repo id) | `iam.workloadIdentityUser` | kit-publisher | — |
+
+  Together with the uploader's `ifGenerationMatch=0` precondition, **a published version can never be
+  changed or deleted** by CI. Only `kits/<tier>/latest.json` moves.
+
+At the end the script prints the exact `gh` commands for step 2.
+
+## 2. One-time GitHub setup
+
+1. **Environment `gcs-publish`.** In Settings → Environments → New environment:
+   * *Required reviewers*: **Chris**. Every publish waits for this approval.
+   * *Deployment branches and tags*: **Selected** → branch `main` and tag `v*`.
+
+   Or use the `gh api` commands the script printed.
+2. **Environment variables.** These are not secrets and nothing here is sensitive. Paste the three lines the
+   script printed into any shell where `gh` is logged in. **Cloud Shell may not have `gh`.** In that case use
+   the web UI: Settings → Environments → **gcs-publish** → *Add environment variable*, once each for
+   `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT` and `GCS_BUCKET`, with the values the script printed:
+   ```sh
+   gh variable set GCP_WIF_PROVIDER    --env gcs-publish --body "projects/<num>/locations/global/workloadIdentityPools/github/providers/offline-toolkit" -R cjrada/offline-toolkit
+   gh variable set GCP_SERVICE_ACCOUNT --env gcs-publish --body "kit-publisher@<project>.iam.gserviceaccount.com" -R cjrada/offline-toolkit
+   gh variable set GCS_BUCKET          --env gcs-publish --body "<project>-kits" -R cjrada/offline-toolkit
+   ```
+3. **Settings → Actions → General.**
+   * Fork pull request workflows: *Require approval for all outside collaborators*.
+   * Workflow permissions: **Read repository contents**.
+4. **Protect `main`.** Require a pull request and the `lint` check, so everything the publish job runs has been reviewed.
+5. **Protect `v*` tags.** Add a tag ruleset limited to maintainers.
+
+## 3. Publish
+
+* **Small kit from a tag:** `git tag v1.0.0 && git push origin v1.0.0`. The version is the tag name.
+* **Any tier by hand:** Actions → **publish-kit** → Run workflow on `main`.
+  * Pick the tier and optionally a version. The default version is `yyyymmdd-<commit>`.
+  * `dry_run` is on by default. For small it builds and checks everything without uploading. For medium/large it only validates the inputs and pins.
+  * Untick it to publish.
+
+What happens:
+
+* **small:** the runner frees about 30 GB of disk and fails early if it has less than 25 GB. It then
+  builds with `--frozen` and authenticates only *after* the build. Finally `tools/publish_gcs.py` uploads.
+* **medium/large:** the job runs `gcloud builds submit --no-source --config cloudbuild.yaml`.
+  * Cloud Build clones this repo at exactly the workflow's commit and verifies the hash.
+  * It builds on an E2_HIGHCPU_8 machine with a 600 GB disk and uploads the same way, as `kit-builder`.
+  * The workflow polls until the build finishes.
+  * Images are pinned by digest. There are no Cloud Build GitHub triggers.
+
+Each publish writes:
+
+```
+gs://BUCKET/kits/<tier>/<version>/offline-toolkit-<tier>-<version>.zip
+gs://BUCKET/kits/<tier>/<version>/offline-toolkit-<tier>-<version>.zip.sha256
+gs://BUCKET/kits/<tier>/<version>/KIT-INFO.json
+gs://BUCKET/kits/<tier>/latest.json            (written last)
+```
+
+Publishing an existing version fails on purpose. The uploader also refuses:
+
+* kits with non-redistributable content (`--with post-disaster`). It checks the `KIT-INFO.json` *inside* the zip.
+* kits built from a dirty tree.
+* kits with unpinned downloads.
+
+GCS rejects any upload whose MD5 differs from what was sent.
+
+## 4. Updating the manifest
+
+Every item is pinned: a sha256 for downloads, or a git commit for `map-assets`. To bump something,
+edit its URL and set `"sha256": null`, then on a trusted machine:
+
+```sh
+python3 tools/build_kit.py --lock --only <item-id>     # downloads it, writes sha256 + size
+git diff tools/kit-manifest.json                       # review, then commit via a PR
+```
+
+Notes:
+
+* Three manuals (FM 4-25.11, USMC Wilderness Medicine, WA DoH water) are `zim-extract` items. They are pulled from the
+  pinned zimgit ZIMs, and their own sha256 is checked. This needs `libzim`:
+  `pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt`.
+* The map (`map-australia`) is the only unpinnable item. It is a go-pmtiles extract of a dated Protomaps
+  build: map data, not code. Its hash goes into the kit's `SHA256SUMS`.
+
+## 5. Build locally (optional)
+
+```sh
+sudo apt install poppler-utils golang-go python3-venv
+python3 -m venv .venv && .venv/bin/pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt
+.venv/bin/python tools/build_kit.py --zip                    # small -> dist/offline-toolkit-small/ (+ zip)
+.venv/bin/python tools/build_kit.py --tier medium --with post-disaster   # personal use only; cannot be published
+```
+
+## Rough costs (australia-southeast1, USD, Nov 2026)
+
+These are estimates. Check <https://cloud.google.com/storage/pricing> and
+<https://cloud.google.com/build/pricing> for current prices.
+
+| | small | medium | large |
+|---|---|---|---|
+| Storage per kept version (Standard, ~$0.023/GB-month) | ~$0.15/month | ~$1/month | ~$4/month |
+| One download to a home PC (internet egress, ~$0.12-0.19/GB) | ~$1 | ~$6 | ~$25-33 |
+| Build | free (GitHub runner) | ~$1-2 (E2_HIGHCPU_8 ~$0.016/min + disk) | ~$3-6 |
+
+* Delete old versions you no longer need. CI cannot delete them, so you have to, as owner:
+  `gcloud storage rm -r gs://BUCKET/kits/<tier>/<old-version>/`.
+* Soft-deleted objects are billed for 7 more days.
+* Downloads within Google Cloud in the same region (for example from Cloud Shell) are free, but then
+  you still have to get the file to your PC.

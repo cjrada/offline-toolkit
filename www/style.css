@@ -8,3 +8,7 @@ input#q{width:60%;padding:.5em;font-size:1em} button{padding:.5em 1em;font-size:
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1em}
 .tile{background:#fff;border-radius:8px;padding:1em;text-decoration:none;color:#222;box-shadow:0 1px 3px #0002}
 .tile h2{margin:.2em 0;color:#3b4a2f} .warn{background:#fff3cd;padding:.8em;border-radius:6px}
+.disclaimer{background:#8a1c1c;color:#fff;padding:.45em 1em;font-size:.92em;margin:0}
+.models{width:100%;border-collapse:collapse;background:#fff;border-radius:6px;font-size:.92em}
+.models td,.models th{padding:.35em .5em;border-bottom:1px solid #eee;text-align:left}
+.fit-gpu,.fit-ram{color:#2d6a1f} .fit-tight{color:#8a5a00} .fit-too-big{color:#a11}

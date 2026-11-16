@@ -4,6 +4,32 @@ A do-it-yourself version of the "AI offline survival drive" idea: copy this fold
 external SSD, plug it into an ordinary **Windows 10/11 or Linux** laptop (64-bit), and run one file.
 No install, no internet, no accounts. Everything runs on `localhost` in your web browser.
 
+> **Not medical advice.** Check current guidance (ANZCOR, St John, Red Cross, Healthdirect). In an emergency call **000**.
+
+## Get a kit onto a drive
+
+Prebuilt kits live in a private Google Cloud Storage bucket (set up with `scripts/setup-gcp.sh`, see
+[docs/SETUP.md](docs/SETUP.md)). With the Google Cloud CLI (`gcloud auth login` first):
+
+```sh
+B=gs://offline-toolkit-kits                         # your bucket
+gcloud storage cat $B/kits/small/latest.json        # shows "version" and "zip"
+V=<version from latest.json>
+gcloud storage cp "$B/kits/small/$V/offline-toolkit-small-$V.zip" "$B/kits/small/$V/offline-toolkit-small-$V.zip.sha256" .
+sha256sum -c offline-toolkit-small-$V.zip.sha256    # must print: OK
+```
+
+On Windows (PowerShell), check the hash with `(Get-FileHash offline-toolkit-small-$V.zip).Hash` and
+compare it with the first word of the `.sha256` file.
+
+1. **Format the drive exFAT.** FAT32 cannot hold files over 4 GB (models and ZIMs are bigger), and NTFS is
+   awkward on some Linux systems. Windows: right-click the drive → Format → exFAT. Linux: `sudo mkfs.exfat -n KIT /dev/sdX1`.
+2. **Unzip onto the drive.**
+   * **Windows:** right-click the zip → *Extract All…* → choose the drive.
+   * **Linux:** `unzip offline-toolkit-small-$V.zip -d /media/$USER/KIT/`. `unzip` keeps the executable bits.
+3. **Optionally check every file.** On Linux, from the kit folder: `sha256sum -c --quiet SHA256SUMS`.
+4. **Run it** as below. You can also build a kit yourself: see *Build a kit*.
+
 | What | Tool | Port |
 |---|---|---|
 | Home page, Ask-the-Manuals, Maps, PDF shelf | `miniserve` (static web server) | 8000 |
@@ -18,7 +44,31 @@ No install, no internet, no accounts. Everything runs on `localhost` in your web
 * **Linux:** `sh start.sh` (or `sh start.sh lan`). Ctrl+C or `sh stop.sh` to stop.
   Works even if the drive is mounted `noexec` (it runs llamafile via `sh` and copies the two small static binaries to /tmp).
 * Then open <http://localhost:8000/>. The AI needs ~10-60 s to load (longer from a slow USB stick).
-* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`.
+* **The model is picked automatically.** Each tier bundles several sizes (small: 1.7B + 4B; medium adds 8B
+  and a vision model; large adds 30B-A3B).
+  1. If a GPU reports enough memory (NVIDIA via `nvidia-smi`; AMD via the amdgpu driver/`rocm-smi` on Linux,
+     or the display adapter's memory on Windows), it uses the biggest model with size + ~1 GB <= VRAM.
+  2. Otherwise it uses the biggest model with size + ~4 GB <= RAM.
+  3. Otherwise it uses the smallest model with a 4k context.
+
+  The launcher prints which model it chose and why. Preview it with `sh tools/pick-model.sh`
+  (Windows: `powershell -File tools\pick-model.ps1`). `models/spare/` is never auto-picked (vision,
+  "uncensored", experiments). A vision model is paired with its projector by name: `x.gguf` + `x.mmproj.gguf`.
+* **Switch models from the home page** ("AI model" panel). It shows the current model, why it was
+  chosen, and every bundled model marked *fits the GPU / fits RAM / tight / too big*. Clicking *Use*
+  restarts the AI with that model in 10-60 s. How it works:
+  * The page uploads a small request to a second miniserve that listens on **127.0.0.1:8079 only**,
+    into a private temp folder.
+  * The request must carry a random per-run token. Only `models.json` contains it, and miniserve sends no
+    CORS headers, so other websites open in the browser cannot read it and cannot forge a switch.
+  * The launcher accepts it only if it names an existing model in `models/` or `models/spare/`, then
+    restarts llamafile.
+  * Phones in LAN mode can see the panel but cannot switch.
+  * No Python is involved. llamafile 0.10.6 includes llama.cpp's multi-model "router" code, but its
+    command line always loads exactly one `-m` model, so the kit restarts it instead.
+* Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`,
+  `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
+  on hidden reasoning, and Ask-the-Manuals would look stuck.
   On Windows: `set MODEL=models\x.gguf` then `start.bat`.
 
 ## What's on the drive (prototype, ~5.1 GB)
@@ -28,14 +78,39 @@ start.sh / start.bat / stop.sh / stop.bat
 bin/llamafile.exe            llamafile 0.10.6 - ONE Actually Portable Executable for Windows + Linux (+ macOS), x86-64 & ARM64
 bin/linux/                   kiwix-serve 3.8.2, miniserve 0.35.0 (static Linux x86-64)
 bin/windows/                 kiwix-serve.exe 3.8.1 (+ ICU DLLs), miniserve.exe 0.35.0 (Windows x86-64)
-models/                      qwen3-4b-instruct-2507-q4_k_m.gguf (2.5 GB, Apache-2.0)
-library/                     Kiwix ZIMs: WikiMed mini (166 MB), zimgit Water, Medicine, Knots (~115 MB)
+models/                      qwen3-4b-instruct-2507-q4_k_m.gguf (2.5 GB) + qwen3-1.7b-q4_k_m.gguf (1.1 GB, for 4 GB laptops), Apache-2.0
+library/                     Kiwix ZIMs: WikiMed mini (166 MB), zimgit Water, Medicine, Knots (~115 MB), Wikivoyage nopic, Outdoors SE
+                             (saved without the date in the name, e.g. wikipedia_en_medicine_mini.zim; KIT-INFO.json records the dated source)
 www/index.html               home page
 www/docs/                    Ask-the-Manuals (RAG): index.js (prebuilt), rag.js, pdf/, notes/, lib/pdf.js
 www/maps/                    australia.pmtiles (2.2 GB, all of Australia to street level) + MapLibre viewer, fonts, sprites
 tools/build_index.py         rebuild the manuals index (needs python3 + pdftotext; only for rebaking)
-tools/download-extras.sh     commented download list for the Medium/Large tiers
+tools/pick-model.sh / .ps1   automatic model choice used by start.sh / start.bat
+tools/build_kit.py           builds the whole kit from tools/kit-manifest.json (hash-pinned downloads)
+tools/publish_gcs.py         uploads a built kit zip to Google Cloud Storage (create-only; used by CI and Cloud Build)
+scripts/setup-gcp.sh         one-time, re-runnable GCP setup (bucket, Workload Identity Federation, service accounts)
+cloudbuild.yaml              medium/large kit builds on Cloud Build (submitted by the publish-kit workflow)
+tools/download-extras.sh     commented download list for one-off Medium/Large additions
+KIT-INFO.json, SHA256SUMS    what was built, from which commit, with the hash of every file
 ```
+
+## Build a kit
+
+None of the large content is in git. `tools/build_kit.py` downloads it from the original publishers,
+**checks each file against the sha256 pinned in `tools/kit-manifest.json`**, and lays out the folder:
+
+```sh
+python3 tools/build_kit.py --check              # list items, sizes, and what is still unpinned
+python3 tools/build_kit.py --zip                # small tier -> dist/offline-toolkit-small/ (+ .zip)
+python3 tools/build_kit.py --tier medium        # or large; each tier includes the ones below it
+python3 tools/build_kit.py --lock               # pin new or changed downloads, then review and commit
+```
+
+Needs python3, `pdftotext` (poppler-utils), Go (for go-pmtiles, the map extractor) and `libzim`
+(`pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt`, to pull three
+manuals out of the pinned zimgit ZIMs). Prebuilt kits are
+published to Google Cloud Storage by the manually started `publish-kit` workflow. See
+[docs/SETUP.md](docs/SETUP.md) for the security model, one-time GCP/GitHub setup and costs.
 
 ### Ask the Manuals (RAG) - how it works
 Python-free at run time. `www/docs/index.js` holds ~2,200 pre-chunked passages from the PDFs. The page does
@@ -101,6 +176,9 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
 * Kiwix: opened WikiMed "Snakebite" article and the zimgit Medicine shelf.
 * Maps: Brisbane at zoom 9 and the CBD at zoom 15.5 rendered.
 * All of the above ran in Chrome with **every non-localhost request blocked** - zero external requests.
+* Model switching (Linux, llamafile 0.10.6, tiny test GGUFs): the home page listed both models, *Use* restarted
+  llamafile on the spare model, and the page reloaded showing it. `tools/pick-model.ps1` passes the same cases
+  as the sh picker under PowerShell 7. Windows-only probes (CIM, registry, `nvidia-smi.exe`) were not run on Windows.
 * Windows: binaries verified as PE x86-64 (`llamafile.exe` is an APE polyglot with a valid PE header); not executed.
 
 ## Licences
@@ -111,5 +189,5 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   * Map data: (c) OpenStreetMap contributors, ODbL; Protomaps basemap; MapLibre (BSD-3), pdf.js (Apache-2.0), Noto fonts (OFL).
   * llamafile (Apache-2.0), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
   * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
-  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`--with-post-disaster`) and is never published in built kits.
+  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`build_kit.py --with post-disaster`), marks the kit `"redistributable": false`, and `publish_gcs.py` refuses to upload such a kit.
 * `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.
