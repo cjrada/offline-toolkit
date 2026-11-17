@@ -110,7 +110,8 @@ What happens:
     the zip as-is (`archive: false`) as a workflow artifact with 1-day retention.
   * **`publish`** runs in the `gcs-publish` environment and is the only job that may request an OIDC token.
     It installs and builds nothing. It re-validates everything the build job passed on, downloads the
-    artifact by id into a new empty directory, and checks two things: the file's sha256 against the build
+    artifact by id into a new empty directory with `skip-decompress: true` (an `archive: false` zip would
+    otherwise be extracted on download), and checks two things: the file's sha256 against the build
     job's output, and that `KIT-INFO.json` inside the zip has the expected tier and version. It then repeats
     the `--dry-run` with the real bucket. Only after that does it authenticate and upload with
     `tools/publish_gcs.py`.

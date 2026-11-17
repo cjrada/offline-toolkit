@@ -212,6 +212,9 @@ jobs:
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: ${{ steps.dir.outputs.dir }}
+          # The build job uploads the zip itself (archive: false), so it is served as application/zip and
+          # download-artifact would extract it. Keep it as one file: we hash and publish the zip, not its contents.
+          skip-decompress: true
           digest-mismatch: error  # the default, stated: fail if GitHub's stored digest doesn't match
 
       - name: Verify kit zip
