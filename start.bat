@@ -2,6 +2,7 @@
 rem Offline Survival Kit launcher (Windows 10/11, 64-bit). Usage: start.bat   or   start.bat lan
 rem Picks the biggest model in models\ that fits this PC's GPU or RAM; switch models on the home page.
 rem Override: set MODEL=models\x.gguf  /  set CTX=4096  /  set GPU=disable
+rem If the AI exits while using the GPU, the launcher restarts it once on the CPU (GPU=disable).
 setlocal EnableDelayedExpansion
 title Offline Kit - launcher (close to stop)
 cd /d "%~dp0"
@@ -9,6 +10,9 @@ set BIND=127.0.0.1
 if /i "%~1"=="lan" set BIND=0.0.0.0
 set "CTL=%TEMP%\offline-toolkit-control"
 set "USER_CTX=%CTX%"
+set "USER_MODEL=%MODEL%"
+rem GPU_FALLBACK=1 once llamafile has exited in GPU mode; the rest of this run stays on the CPU.
+set GPU_FALLBACK=
 rem Thinking off by default (Qwen3 1.7B/8B otherwise burn the answer budget on hidden reasoning).
 if not defined REASONING set REASONING=off
 if /i not "%REASONING%"=="off" if /i not "%REASONING%"=="on" if /i not "%REASONING%"=="auto" (echo REASONING must be on, off or auto & pause & exit /b 1)
@@ -50,6 +54,7 @@ echo   Run stop.bat (or close this window and the minimised ones) to stop.
 
 :watch
 ping -n 2 127.0.0.1 >nul
+if defined LLM_UP (tasklist /fi "imagename eq llamafile.exe" /nh 2>nul | find /i "llamafile.exe" >nul || goto llm_exited)
 if not exist "%CTL%\switch.txt" goto watch
 move /y "%CTL%\switch.txt" "%CTL%\request.txt" >nul
 set "CTX=%USER_CTX%"
@@ -60,10 +65,41 @@ for /f "usebackq tokens=1,* delims==" %%a in (`powershell -NoProfile -ExecutionP
 )
 del /q "%CTL%\*" >nul 2>&1
 if not defined PICKED (echo Ignored an invalid model-switch request. & goto watch)
+set "USER_MODEL=%MODEL%"
 echo Switching model ...
 taskkill /f /im llamafile.exe >nul 2>&1
 ping -n 3 127.0.0.1 >nul
 call :start_llm
+goto watch
+
+rem llamafile exited by itself (we only kill it to switch models or stop). With a GPU the usual cause is
+rem a driver/CUDA/Vulkan failure or running out of GPU memory, so retry once on the CPU, re-picking the
+rem model against RAM. Restart the kit to try the GPU again.
+:llm_exited
+set LLM_UP=
+if /i "%GPU%"=="disable" goto llm_dead
+echo The AI model stopped in GPU mode - retrying on the CPU ...
+set GPU=disable
+set GPU_FALLBACK=1
+set "MODEL=%USER_MODEL%"
+set "CTX=%USER_CTX%"
+set PICKED=
+for /f "usebackq tokens=1,* delims==" %%a in (`%PICK% 2^>nul`) do (
+  set "%%a=%%b"
+  set PICKED=1
+)
+if not defined PICKED (
+  rem PowerShell unavailable: keep the model that was running.
+  set "MODEL=%LAST_MODEL%"
+  if not defined CTX set CTX=4096
+  set "REASON=GPU mode failed, running on the CPU"
+)
+call :start_llm
+goto watch
+
+:llm_dead
+echo The AI model stopped. The library, manuals and maps keep working.
+echo Pick another model on the home page, or close everything and run start.bat again.
 goto watch
 
 :start_llm
@@ -73,4 +109,6 @@ set GPUARG=
 if defined GPU set GPUARG=--gpu %GPU%
 echo Starting AI model (%MODEL%, context %CTX%) - %REASON% ...
 start "Offline Kit - AI" /min bin\llamafile.exe --server -m "%MODEL%" %MMARG% --host %BIND% --port 8080 -c %CTX% --reasoning %REASONING% %GPUARG%
+set "LAST_MODEL=%MODEL%"
+set LLM_UP=1
 exit /b 0

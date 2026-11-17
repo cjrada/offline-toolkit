@@ -24,6 +24,8 @@ jobs:
         run: |
           sh tests/test_pick_model.sh
           sh tests/test_pick_model_ps1.sh
+      - name: launcher CPU fallback test (stub llamafile)
+        run: sh tests/test_cpu_fallback.sh
       - name: build dependency (libzim, hash-pinned)
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"

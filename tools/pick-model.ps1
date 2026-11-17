@@ -4,6 +4,8 @@
 #  2. RAM: largest models\*.gguf with size + 4096 MB <= RAM.   3. Else the smallest, 4k context.
 # models\spare\ is never auto-picked. models\x.gguf pairs with models\x.mmproj.gguf (vision projector).
 # Prints KEY=VALUE lines (MODEL, MMPROJ, CTX, REASON) for start.bat. Respects $env:MODEL / CTX / GPU.
+# $env:GPU_FALLBACK=1 (start.bat sets it with GPU=disable after llamafile exited in GPU mode) notes the
+# fallback in REASON and models.json.
 #   -Json FILE         also write the home page's www\models.json
 #   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server): line 1 must equal
 #                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\; else exit 1
@@ -84,6 +86,8 @@ if ($model) {
   }
   $model = 'models\' + $m.Name
 }
+$fallback = ($env:GPU_FALLBACK -eq '1')
+if ($fallback) { $reason = "GPU mode failed, running on the CPU; $reason" }
 if (-not $ctx) { $ctx = if ($fit -eq 'gpu' -or $fit -eq 'ram') { '8192' } else { '4096' } }
 $mm = $model -replace '\.gguf$', '.mmproj.gguf'
 $mmproj = if (Test-Path -LiteralPath $mm -PathType Leaf) { $mm } else { '' }
@@ -99,7 +103,7 @@ if ($Json) {
     }
   }
   $o = [ordered]@{ current = ($model -replace '\\', '/'); ctx = [int]$ctx; reason = $reason; ram_mb = $ramMB; vram_mb = $vramMB;
-                   switch_port = 8079; switch_token = ($env:SWITCH_TOKEN -replace '[^0-9a-f]', ''); models = $list }
+                   gpu_fallback = $fallback; switch_port = 8079; switch_token = ($env:SWITCH_TOKEN -replace '[^0-9a-f]', ''); models = $list }
   try { [IO.File]::WriteAllText((Join-Path $kit $Json), (ConvertTo-Json $o -Depth 4 -Compress)) } catch {}
 }
 "MODEL=$model"

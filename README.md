@@ -66,6 +66,11 @@ compare it with the first word of the `.sha256` file.
   * Phones in LAN mode can see the panel but cannot switch.
   * No Python is involved. llamafile 0.10.6 includes llama.cpp's multi-model "router" code, but its
     command line always loads exactly one `-m` model, so the kit restarts it instead.
+* **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU (driver/CUDA/ROCm/Vulkan
+  trouble, or GPU memory runs out), the launcher restarts it once with `--gpu disable`, re-picking the model
+  for RAM (the GPU-sized one may not fit). The home page says it is running on the CPU. Later model switches
+  stay on the CPU; restart the kit to try the GPU again. The GPU attempt's log is kept as
+  `llamafile-gpu.log` (Linux). If CPU mode exits too, the launcher reports it and does not loop.
 * Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`,
   `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
   on hidden reasoning, and Ask-the-Manuals would look stuck.
@@ -179,6 +184,10 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
 * Model switching (Linux, llamafile 0.10.6, tiny test GGUFs): the home page listed both models, *Use* restarted
   llamafile on the spare model, and the page reloaded showing it. `tools/pick-model.ps1` passes the same cases
   as the sh picker under PowerShell 7. Windows-only probes (CIM, registry, `nvidia-smi.exe`) were not run on Windows.
+* CPU fallback (`tests/test_cpu_fallback.sh`, stub llamafile that exits unless `--gpu disable`): `start.sh`
+  restarted it on the CPU with the model re-picked for RAM, `models.json` reported the fallback, a later switch
+  stayed on the CPU, and a CPU-mode exit was reported without a restart loop. Not tried with a real GPU failure;
+  the `start.bat` fallback was not run on Windows.
 * Windows: binaries verified as PE x86-64 (`llamafile.exe` is an APE polyglot with a valid PE header); not executed.
 
 ## Licences

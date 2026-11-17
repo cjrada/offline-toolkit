@@ -13,7 +13,8 @@
   catch { $("curModel").textContent = "unknown (models.json not written - read-only drive?)"; return; }
   const name = p => p.split("/").pop().replace(/\.gguf$/, "");
   $("curModel").textContent = name(info.current) + ` (context ${info.ctx})`;
-  $("modelWhy").textContent = `Why: ${info.reason}. This computer: ${info.ram_mb} MB RAM` + (info.vram_mb ? `, ${info.vram_mb} MB GPU memory.` : ", no GPU detected.");
+  $("modelWhy").textContent = `Why: ${info.reason}. This computer: ${info.ram_mb} MB RAM` + (info.vram_mb ? `, ${info.vram_mb} MB GPU memory.` :
+    info.gpu_fallback ? ". The AI stopped in GPU mode, so it now runs on the CPU (slower; restart the kit to try the GPU again)." : ", no GPU detected.");
   $("modelRows").innerHTML = info.models.map(m => `<tr><td>${esc(m.name)}${m.spare ? " <span class=small>(spare)</span>" : ""}${m.vision ? " <span class=small>(photos)</span>" : ""}</td>
     <td>${(m.mb / 1024).toFixed(1)} GB</td><td class="fit-${esc(m.fit)}">${esc(FIT[m.fit] || m.fit)}</td>
     <td>${m.path === info.current ? "<b>in use</b>" : local ? `<button data-p="${esc(m.path)}" data-fit="${esc(m.fit)}">Use</button>` : ""}</td></tr>`).join("");

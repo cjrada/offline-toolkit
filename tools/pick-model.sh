@@ -10,6 +10,8 @@
 # from the home page or with MODEL=models/spare/x.gguf. Projectors pair by name: x.gguf + x.mmproj.gguf.
 # Overrides: MODEL, CTX, GPU=disable (ignore the GPU), RAM_MB / VRAM_MB (pretend sizes, for tests),
 # HEADROOM_MB (default 4096), GPU_HEADROOM_MB (default 1024).
+# GPU_FALLBACK=1 (set by start.sh after llamafile exited in GPU mode; use with GPU=disable) notes the
+# fallback in PICK_REASON and models.json.
 # Show the decision and the list without starting anything:  sh tools/pick-model.sh [--json]
 
 pick_ram_mb() {
@@ -86,6 +88,7 @@ pick_model() {
       MODEL="$_small"; _fit=tight; PICK_REASON="nothing fits ${_ram} MB RAM comfortably; smallest model, 4k context (slow)"
     fi
   fi
+  [ "${GPU_FALLBACK:-}" = 1 ] && PICK_REASON="GPU mode failed, running on the CPU; $PICK_REASON"
   case "$_fit" in gpu|ram) CTX="${CTX:-8192}" ;; *) CTX="${CTX:-4096}" ;; esac
   MMPROJ=""
   _mm="${MODEL%.gguf}.mmproj.gguf"
@@ -97,8 +100,9 @@ pick_model() {
 # listed, so no escaping is needed; others still work with MODEL=.
 pick_models_json() {
   _dir="${MODELS_DIR:-models}"
-  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"switch_port":8079,"switch_token":"%s","models":[' \
-    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram" "$(printf '%s' "${SWITCH_TOKEN:-}" | tr -dc '0-9a-f')"
+  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"gpu_fallback":%s,"switch_port":8079,"switch_token":"%s","models":[' \
+    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram" "$([ "${GPU_FALLBACK:-}" = 1 ] && echo true || echo false)" \
+    "$(printf '%s' "${SWITCH_TOKEN:-}" | tr -dc '0-9a-f')"
   _sep=""
   for _f in "$_dir"/*.gguf "$_dir"/spare/*.gguf; do
     pick_is_model "$_f" || continue

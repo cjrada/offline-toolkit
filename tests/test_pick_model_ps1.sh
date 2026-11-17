@@ -32,4 +32,9 @@ for r in '../x.gguf' 'models/qwen3-8b-q4_k_m.mmproj.gguf' 'models/missing.gguf' 
   printf '%s\n%s' "$SWITCH_TOKEN" "$r" >req.txt
   [ -z "$(run 7800 0 -RequestFile req.txt)" ] && echo "ok   reject $r" || { echo "FAIL accepted $r"; fail=1; }
 done
+# CPU fallback (start.bat sets GPU=disable GPU_FALLBACK=1 after llamafile exits in GPU mode)
+out=$(env -u MODEL -u CTX GPU=disable GPU_FALLBACK=1 RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 -Json www/models.json 2>/dev/null | tr '\r\n' '  ')
+expect "GPU fallback re-picks for RAM" "$out" 'MODEL=models\qwen3-1.7b-q4_k_m.gguf MMPROJ= CTX=4096 REASON=GPU mode failed, running on the CPU;'
+python3 -c 'import json;d=json.load(open("www/models.json"));assert d["gpu_fallback"] is True and d["vram_mb"]==0' \
+  && echo "ok   models.json gpu_fallback" || { echo "FAIL models.json gpu_fallback"; fail=1; }
 exit $fail

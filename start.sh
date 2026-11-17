@@ -13,7 +13,8 @@ LOG="$TMPD/offline-toolkit-logs"; mkdir -p "$LOG"
 REASONING="${REASONING:-off}"
 case "$REASONING" in on|off|auto) ;; *) echo "REASONING must be on, off or auto"; exit 1 ;; esac
 . "$KIT/tools/pick-model.sh"
-USER_CTX="${CTX:-}"
+USER_CTX="${CTX:-}"; USER_MODEL="${MODEL:-}"
+GPU_FALLBACK=""; export GPU_FALLBACK   # set to 1 once GPU mode has failed; stays on CPU for this run
 pick_model || exit 1
 
 # Static Linux binaries; if the drive won't let us execute, run copies from /tmp.
@@ -45,6 +46,25 @@ start_llm(){
      --host "$BIND" --port 8080 -c "$CTX" --reasoning "$REASONING" ${GPU:+--gpu "$GPU"} >"$LOG/llamafile.log" 2>&1 &
   LLM_PID=$!
   write_status
+}
+
+# llamafile exited by itself (we never kill it except to switch models or stop). The usual cause with
+# a GPU is a driver/CUDA/ROCm/Vulkan failure or running out of GPU memory, so retry once on the CPU,
+# re-picking the model against RAM (the GPU-sized pick may not fit RAM). Later switches stay on the CPU;
+# restart the kit to try the GPU again.
+llm_exited(){
+  wait "$LLM_PID" 2>/dev/null; _st=$?; LLM_PID=""
+  if [ "${GPU:-}" != "disable" ]; then
+    echo "The AI model stopped (exit code $_st) in GPU mode - retrying on the CPU. Log: $LOG/llamafile-gpu.log"
+    tail -n 5 "$LOG/llamafile.log" 2>/dev/null | sed 's/^/    /'
+    cp "$LOG/llamafile.log" "$LOG/llamafile-gpu.log" 2>/dev/null
+    GPU=disable; GPU_FALLBACK=1; MODEL="$USER_MODEL"; CTX="$USER_CTX"
+    pick_model && start_llm
+  else
+    echo "The AI model stopped (exit code $_st). Last lines of $LOG/llamafile.log:"
+    tail -n 10 "$LOG/llamafile.log" 2>/dev/null | sed 's/^/    /'
+    echo "  The library, manuals and maps keep working. Pick another model on the home page, or restart."
+  fi
 }
 start_llm
 
@@ -80,13 +100,14 @@ echo "  Press Ctrl+C here to stop everything."
 
 while :; do
   sleep 1
+  if [ -n "$LLM_PID" ] && ! kill -0 "$LLM_PID" 2>/dev/null; then llm_exited; fi
   [ -f "$CTL/switch.txt" ] || continue
   TOK=$(sed -n 1p "$CTL/switch.txt" | head -c 100 | tr -d '\r')
   REQ=$(sed -n 2p "$CTL/switch.txt" | head -c 200 | tr -d '\r'); rm -f "$CTL"/*
   if [ -n "$SWITCH_TOKEN" ] && [ "$TOK" = "$SWITCH_TOKEN" ] && pick_valid_request "$REQ"; then
     echo "Switching model to $REQ ..."
-    kill "$LLM_PID" 2>/dev/null; wait "$LLM_PID" 2>/dev/null
-    MODEL="$REQ"; CTX="$USER_CTX"; pick_model && start_llm
+    [ -n "$LLM_PID" ] && { kill "$LLM_PID" 2>/dev/null; wait "$LLM_PID" 2>/dev/null; }
+    LLM_PID=""; USER_MODEL="$REQ"; MODEL="$REQ"; CTX="$USER_CTX"; pick_model && start_llm
   else
     echo "Ignored an invalid model-switch request."
   fi
