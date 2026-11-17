@@ -66,15 +66,47 @@ compare it with the first word of the `.sha256` file.
   * Phones in LAN mode can see the panel but cannot switch.
   * No Python is involved. llamafile 0.10.6 includes llama.cpp's multi-model "router" code, but its
     command line always loads exactly one `-m` model, so the kit restarts it instead.
-* **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU (driver/CUDA/ROCm/Vulkan
-  trouble, or GPU memory runs out), the launcher restarts it once with `--gpu disable`, re-picking the model
-  for RAM (the GPU-sized one may not fit). The home page says it is running on the CPU. Later model switches
-  stay on the CPU; restart the kit to try the GPU again. The GPU attempt's log is kept as
-  `llamafile-gpu.log` (Linux). If CPU mode exits too, the launcher reports it and does not loop.
+* **"Use CPU only" toggle** (home page, under the model list). Shows whether the AI runs on the CPU only
+  or in GPU / auto mode; ticking or unticking it restarts llamafile with or without `--gpu disable`. If the
+  model was picked automatically, it is picked again for the new mode (RAM vs GPU memory); a model you chose
+  is kept. It uses the same 127.0.0.1:8079 switch service and per-run token as *Use* (the request carries a
+  third line, `cpu=on` or `cpu=off`, validated as strictly as the model path), so it is laptop-only too.
+* **GPU workarounds (llamafile 0.10.6, Vulkan).** Every llamafile start gets `DISABLE_VULKAN_OBS_CAPTURE=1`
+  and `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS Studio's Vulkan hook crashes it), and GPU starts pass
+  `-fa off` (Vulkan flash attention can segfault). See *Troubleshooting*.
+* **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU, or is still not answering
+  `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change), the launcher restarts it once
+  with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
+  *"GPU start failed (...) - fell back to the CPU"* line. On Windows, `start.bat` starts llamafile with `start`
+  and cannot see its exit code, so it watches `tasklist` and polls `/health` with `curl.exe`. The home page
+  says the GPU start failed; later model switches stay on the CPU until you untick *Use CPU only* (or restart).
+  Linux keeps the GPU attempt's log as `llamafile-gpu.log`. If CPU mode exits too, the launcher reports it
+  and does not loop. No automatic fallback when you pinned a backend yourself (`GPU=vulkan` etc.).
 * Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`,
-  `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
+  `FA=on|off|auto` (flash attention; GPU default `off`), `NGL=<layers>` (GPU layers; default: llamafile
+  decides), `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
   on hidden reasoning, and Ask-the-Manuals would look stuck.
   On Windows: `set MODEL=models\x.gguf` then `start.bat`.
+
+## Troubleshooting
+* **Chat / `localhost:8080` refused, or "AI: starting / not running" on the home page.** llamafile is still
+  loading (10-60 s, longer from a slow USB stick) or has exited. Read the launcher window: it says when the
+  AI is ready, and whether it fell back to the CPU. Logs on Linux: `$TMPDIR/offline-toolkit-logs/llamafile.log`
+  (`llamafile-gpu.log` for a failed GPU attempt). On Windows, run `bin\llamafile.exe` by hand with the
+  arguments the launcher printed to see the error.
+* **OBS Studio installed (Windows).** OBS registers an implicit Vulkan layer (`VK_LAYER_OBS_HOOK`,
+  `C:\ProgramData\obs-studio-hook\obs-vulkan64.json`) that crashes llamafile 0.10.6's Vulkan init with
+  0xC0000005, even at `-ngl 1`. The launchers set `DISABLE_VULKAN_OBS_CAPTURE=1` and
+  `VK_LOADER_LAYERS_DISABLE=~implicit~` for llamafile, which fixes it and still uses the GPU. If you start
+  llamafile yourself, set either one first.
+* **Vulkan flash attention can segfault** on some NVIDIA cards/drivers (seen on an RTX 2070 Max-Q, driver
+  551.61): with higher `-ngl` / context (qwen3-4b at `-c 8192` and 35+ GPU layers) llamafile exits with
+  code 11 right after "Flash Attention enabled". It is not out of memory. The kit passes `-fa off` on the GPU;
+  `FA=on` turns it back on.
+* **NVIDIA on Windows uses Vulkan.** This llamafile build has no CUDA backend, so `GPU=nvidia` is fatal;
+  leave `GPU` unset (auto) or use `GPU=vulkan`.
+* **If the GPU still fails,** the launcher falls back to the CPU by itself (above). To skip the GPU entirely,
+  tick *Use CPU only* on the home page, or start with `GPU=disable` (Windows: `set GPU=disable`).
 
 ## What's on the drive (prototype, ~5.1 GB)
 
@@ -184,10 +216,16 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
 * Model switching (Linux, llamafile 0.10.6, tiny test GGUFs): the home page listed both models, *Use* restarted
   llamafile on the spare model, and the page reloaded showing it. `tools/pick-model.ps1` passes the same cases
   as the sh picker under PowerShell 7. Windows-only probes (CIM, registry, `nvidia-smi.exe`) were not run on Windows.
-* CPU fallback (`tests/test_cpu_fallback.sh`, stub llamafile that exits unless `--gpu disable`): `start.sh`
-  restarted it on the CPU with the model re-picked for RAM, `models.json` reported the fallback, a later switch
-  stayed on the CPU, and a CPU-mode exit was reported without a restart loop. Not tried with a real GPU failure;
-  the `start.bat` fallback was not run on Windows.
+* GPU workarounds, Windows (RTX 2070 Max-Q, 32 GB RAM, driver 551.61, llamafile 0.10.6 Vulkan; tested on
+  that laptop, not by CI): with the OBS env vars and `-fa off` the server reached 32 tok/s on the GPU.
+* CPU fallback and *Use CPU only* (`tests/test_cpu_fallback.sh`, stub llamafile/miniserve, Linux): GPU exit
+  and GPU hang (no `/health`) both restart once on the CPU with the model re-picked for RAM and one
+  "fell back" line; `-fa off` on GPU starts only; OBS env vars on every start; FA/NGL/GPU overrides; no
+  fallback with `GPU=vulkan`; no restart loop when CPU mode exits; slow CPU starts are not killed; the toggle
+  on/off (also after a fallback), keeping a hand-picked model, and rejecting bad flags / wrong token.
+  `tests/test_pick_model*.sh` cover the request validation in both pickers; `tests/test_start_bat.py` checks
+  `start.bat` statically. The home-page toggle was checked in headless Chromium (state shown, correct request
+  sent, disabled when opened from another host). `start.bat` itself was not run.
 * Windows: binaries verified as PE x86-64 (`llamafile.exe` is an APE polyglot with a valid PE header); not executed.
 
 ## Licences

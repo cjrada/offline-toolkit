@@ -24,8 +24,10 @@ jobs:
         run: |
           sh tests/test_pick_model.sh
           sh tests/test_pick_model_ps1.sh
-      - name: launcher CPU fallback test (stub llamafile)
+      - name: launcher GPU workarounds, CPU fallback and CPU-only toggle (stub llamafile)
         run: sh tests/test_cpu_fallback.sh
+      - name: start.bat static checks (Windows launcher in step with start.sh)
+        run: python3 tests/test_start_bat.py
       - name: build dependency (libzim, hash-pinned)
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"

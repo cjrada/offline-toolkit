@@ -5,11 +5,14 @@
 # models\spare\ is never auto-picked. models\x.gguf pairs with models\x.mmproj.gguf (vision projector).
 # Prints KEY=VALUE lines (MODEL, MMPROJ, CTX, REASON) for start.bat. Respects $env:MODEL / CTX / GPU.
 # $env:GPU_FALLBACK=1 (start.bat sets it with GPU=disable after llamafile exited in GPU mode) notes the
-# fallback in REASON and models.json.
+# fallback in REASON and models.json. $env:LLM_RUN (start counter) is copied into models.json.
+# Also prints LOAD_TIMEOUT: $env:HEALTH_TIMEOUT, else 60 s + 1 s per 50 MB of model.
 #   -Json FILE         also write the home page's www\models.json
 #   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server): line 1 must equal
-#                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\; else exit 1
-param([string]$Json = '', [string]$RequestFile = '')
+#                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\, optional line 3
+#                      must be exactly cpu=on or cpu=off (home-page "Use CPU only" toggle); else exit 1
+#   -CheckOnly         with -RequestFile: only validate, print REQ_MODEL=... and REQ_CPU=on|off|keep
+param([string]$Json = '', [string]$RequestFile = '', [switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 $kit = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $kit
@@ -21,6 +24,25 @@ if ($env:RAM_MB) { $ramMB = [int64]$env:RAM_MB }
 else {
   try { $ramMB = [int64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB) }
   catch { try { $ramMB = [int64]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory / 1MB) } catch { $ramMB = 0 } }
+}
+
+$ctx = $env:CTX
+$model = $env:MODEL
+if ($RequestFile) {
+  $lines = @()
+  try { $lines = @(Get-Content -LiteralPath $RequestFile -TotalCount 3 -ErrorAction Stop) } catch {}
+  $tok = if ($lines.Count -ge 1) { ([string]$lines[0]).Trim() } else { '' }
+  $req = if ($lines.Count -ge 2) { ([string]$lines[1]).Trim() } else { '' }
+  $cpu = if ($lines.Count -ge 3) { [string]$lines[2] } else { '' }
+  if (-not $env:SWITCH_TOKEN -or $tok -cne $env:SWITCH_TOKEN) { [Console]::Error.WriteLine('bad or missing switch token'); exit 1 }
+  if ($req -notmatch '^models/(spare/)?[A-Za-z0-9._-]+\.gguf$' -or $req -match '\.\.' -or $req -match 'mmproj') {
+    [Console]::Error.WriteLine('invalid model-switch request'); exit 1 }
+  if (-not ($cpu -ceq '' -or $cpu -ceq 'cpu=on' -or $cpu -ceq 'cpu=off')) { [Console]::Error.WriteLine('invalid cpu flag'); exit 1 }
+  $model = $req -replace '/', '\'
+  if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { [Console]::Error.WriteLine('requested model not found'); exit 1 }
+  if ($CheckOnly) { "REQ_MODEL=$model"; "REQ_CPU=" + $(if ($cpu) { $cpu.Substring(4) } else { 'keep' }); exit 0 }
+  if ($cpu -ceq 'cpu=on') { $env:GPU = 'disable'; $env:GPU_FALLBACK = '' }
+  elseif ($cpu -ceq 'cpu=off') { $env:GPU = $(if ($env:USER_GPU -ne 'disable') { $env:USER_GPU } else { '' }); $env:GPU_FALLBACK = '' }
 }
 
 $vramMB = 0
@@ -56,20 +78,6 @@ function Models($dir) {
     Where-Object { $_.Name -notmatch 'mmproj' } | Sort-Object Length)
 }
 
-$ctx = $env:CTX
-$model = $env:MODEL
-if ($RequestFile) {
-  $lines = @()
-  try { $lines = @(Get-Content -LiteralPath $RequestFile -TotalCount 2 -ErrorAction Stop) } catch {}
-  $tok = if ($lines.Count -ge 1) { ([string]$lines[0]).Trim() } else { '' }
-  $req = if ($lines.Count -ge 2) { ([string]$lines[1]).Trim() } else { '' }
-  if (-not $env:SWITCH_TOKEN -or $tok -cne $env:SWITCH_TOKEN) { [Console]::Error.WriteLine('bad or missing switch token'); exit 1 }
-  if ($req -notmatch '^models/(spare/)?[A-Za-z0-9._-]+\.gguf$' -or $req -match '\.\.' -or $req -match 'mmproj') {
-    [Console]::Error.WriteLine('invalid model-switch request'); exit 1 }
-  $model = $req -replace '/', '\'
-  if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { [Console]::Error.WriteLine('requested model not found'); exit 1 }
-}
-
 if ($model) {
   if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { [Console]::Error.WriteLine("MODEL=$model does not exist"); exit 1 }
   $fit = Fit (SizeMB (Get-Item -LiteralPath $model)); $reason = "chosen by you ($fit)"
@@ -87,7 +95,9 @@ if ($model) {
   $model = 'models\' + $m.Name
 }
 $fallback = ($env:GPU_FALLBACK -eq '1')
+$cpuOnly = ($env:GPU -eq 'disable')
 if ($fallback) { $reason = "GPU mode failed, running on the CPU; $reason" }
+elseif ($cpuOnly) { $reason = "CPU only; $reason" }
 if (-not $ctx) { $ctx = if ($fit -eq 'gpu' -or $fit -eq 'ram') { '8192' } else { '4096' } }
 $mm = $model -replace '\.gguf$', '.mmproj.gguf'
 $mmproj = if (Test-Path -LiteralPath $mm -PathType Leaf) { $mm } else { '' }
@@ -103,10 +113,13 @@ if ($Json) {
     }
   }
   $o = [ordered]@{ current = ($model -replace '\\', '/'); ctx = [int]$ctx; reason = $reason; ram_mb = $ramMB; vram_mb = $vramMB;
-                   gpu_fallback = $fallback; switch_port = 8079; switch_token = ($env:SWITCH_TOKEN -replace '[^0-9a-f]', ''); models = $list }
+                   gpu_fallback = $fallback; cpu_only = $cpuOnly; run = $(if ($env:LLM_RUN -match '^[0-9]+$') { [int]$env:LLM_RUN } else { 0 });
+                   switch_port = 8079; switch_token = ($env:SWITCH_TOKEN -replace '[^0-9a-f]', ''); models = $list }
   try { [IO.File]::WriteAllText((Join-Path $kit $Json), (ConvertTo-Json $o -Depth 4 -Compress)) } catch {}
 }
 "MODEL=$model"
 "MMPROJ=$mmproj"
 "CTX=$ctx"
 "REASON=$reason"
+$loadTimeout = if ($env:HEALTH_TIMEOUT -match '^[0-9]+$') { [int64]$env:HEALTH_TIMEOUT } else { 60 + [int64][math]::Floor((SizeMB (Get-Item -LiteralPath $model)) / 50) }
+"LOAD_TIMEOUT=$loadTimeout"
