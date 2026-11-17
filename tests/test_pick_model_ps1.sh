@@ -57,4 +57,8 @@ python3 -c 'import json;d=json.load(open("www/models.json"));assert d["cpu_only"
   && echo "ok   models.json cpu_only / run" || { echo "FAIL models.json cpu_only"; fail=1; }
 expect "load timeout from size" "$(run 3900 12288)" 'LOAD_TIMEOUT=160'
 expect "HEALTH_TIMEOUT override" "$(HEALTH_TIMEOUT=30 run 3900 12288)" 'LOAD_TIMEOUT=30'
+# GPU_MB: start.bat falls back to the CPU only after a GPU attempt (GPU_MB > 0)
+expect "GPU_MB with a GPU"       "$(run 3900 12288)" 'GPU_MB=12288'
+expect "GPU_MB with no GPU"      "$(run 3900 0)"     'GPU_MB=0'
+expect "GPU_MB with GPU=disable" "$(env -u MODEL -u CTX GPU=disable RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 2>/dev/null | tr '\r\n' '  ')" 'GPU_MB=0'
 exit $fail

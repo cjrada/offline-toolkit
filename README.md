@@ -75,13 +75,16 @@ compare it with the first word of the `.sha256` file.
   and `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS Studio's Vulkan hook crashes it), and GPU starts pass
   `-fa off` (Vulkan flash attention can segfault). See *Troubleshooting*.
 * **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU, or is still not answering
-  `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change), the launcher restarts it once
-  with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
+  `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change) while a GPU is in use, the
+  launcher restarts it once with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
   *"GPU start failed (...) - fell back to the CPU"* line. On Windows, `start.bat` starts llamafile with `start`
   and cannot see its exit code, so it watches `tasklist` and polls `/health` with `curl.exe`. The home page
   says the GPU start failed; later model switches stay on the CPU until you untick *Use CPU only* (or restart).
   Linux keeps the GPU attempt's log as `llamafile-gpu.log`. If CPU mode exits too, the launcher reports it
   and does not loop. No automatic fallback when you pinned a backend yourself (`GPU=vulkan` etc.).
+  It only falls back after a real GPU attempt: the picker saw GPU memory for that start (or, on Linux,
+  llamafile's log names a GPU device). With no GPU, or on the CPU, a slow load (big model, slow USB) is
+  reported once and left loading - restarting it with `--gpu disable` would only make you wait again.
 * Options: `MODEL=models/spare/other.gguf sh start.sh`, `CTX=4096` (less RAM), `GPU=disable`,
   `FA=on|off|auto` (flash attention; GPU default `off`), `NGL=<layers>` (GPU layers; default: llamafile
   decides), `REASONING=on|auto`. Thinking is **off** by default: Qwen3 1.7B/8B would otherwise spend the answer budget
@@ -220,7 +223,8 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   that laptop, not by CI): with the OBS env vars and `-fa off` the server reached 32 tok/s on the GPU.
 * CPU fallback and *Use CPU only* (`tests/test_cpu_fallback.sh`, stub llamafile/miniserve, Linux): GPU exit
   and GPU hang (no `/health`) both restart once on the CPU with the model re-picked for RAM and one
-  "fell back" line; `-fa off` on GPU starts only; OBS env vars on every start; FA/NGL/GPU overrides; no
+  "fell back" line; with no GPU detected, a slow or hanging load is left running and an exit is only
+  reported (no `--gpu disable` restart), unless the log shows a Vulkan device; `-fa off` on GPU starts only; OBS env vars on every start; FA/NGL/GPU overrides; no
   fallback with `GPU=vulkan`; no restart loop when CPU mode exits; slow CPU starts are not killed; the toggle
   on/off (also after a fallback), keeping a hand-picked model, and rejecting bad flags / wrong token.
   `tests/test_pick_model*.sh` cover the request validation in both pickers; `tests/test_start_bat.py` checks

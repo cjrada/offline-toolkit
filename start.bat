@@ -7,8 +7,8 @@ rem   OBS Studio's implicit Vulkan layer crashes Vulkan init (0xC0000005) - disa
 rem   DISABLE_VULKAN_OBS_CAPTURE=1 and VK_LOADER_LAYERS_DISABLE=~implicit~ (your own values are kept);
 rem   Vulkan flash attention segfaults at higher -ngl / context - GPU runs pass "-fa off" (set FA=on to undo).
 rem   Also: set NGL=33 (GPU layers; default: llamafile decides).
-rem If the AI exits, or is not ready in time, on the GPU it is restarted once on the CPU - unless you
-rem set GPU yourself (e.g. GPU=vulkan). The home page's "Use CPU only" toggle switches CPU only / GPU.
+rem If the AI exits, or is not ready in time, while a GPU is in use it is restarted once on the CPU -
+rem unless you set GPU yourself (e.g. GPU=vulkan). With no GPU (GPU_MB=0) a slow load is left running. The home page's "Use CPU only" toggle switches CPU only / GPU.
 setlocal EnableDelayedExpansion
 title Offline Kit - launcher (close to stop)
 cd /d "%~dp0"
@@ -44,6 +44,7 @@ set SWITCH_TOKEN=
 for /f %%t in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"') do set "SWITCH_TOKEN=%%t"
 set "PICK=powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\pick-model.ps1" -Json www\models.json"
 set REASON=
+set GPU_MB=
 set PICKED=
 for /f "usebackq tokens=1,* delims==" %%a in (`%PICK% 2^>nul`) do (
   set "%%a=%%b"
@@ -113,8 +114,9 @@ for /f "usebackq tokens=1,* delims==" %%a in (`%PICK% 2^>nul`) do (
   set PICKED=1
 )
 if not defined PICKED (
-  rem PowerShell failed: use the requested model as-is.
+  rem PowerShell failed: use the requested model as-is (GPU memory unknown, so no automatic fallback).
   set "MODEL=%REQ_MODEL%"
+  set GPU_MB=0
   set MMPROJ=
   if not defined CTX set CTX=4096
   set "REASON=chosen on the home page"
@@ -131,18 +133,18 @@ rem set by hand (GPU=vulkan etc.). The home-page toggle can try the GPU again.
 :llm_exited
 set LLM_UP=
 if defined GPU goto llm_dead
+rem No GPU memory seen for this start (no GPU, or PowerShell missing): not a GPU failure, no fallback.
+if "%LLM_VRAM%"=="0" goto llm_dead
 set "FAIL_WHY=AI process exited"
 goto cpu_fallback
 
-rem Alive but never answered /health within LOAD_TIMEOUT: a hang during load. Retry on the CPU if this
-rem was a GPU start; a slow CPU start is only reported (there is nothing better to try).
+rem Alive but never answered /health within LOAD_TIMEOUT: a hang during load. Retry on the CPU only if a
+rem GPU was in use for this start (GPU_MB > 0, GPU not pinned by hand). Any other slow load (CPU only,
+rem no GPU) is reported once and left running; the health poll goes on so "ready" is still shown.
 :llm_hung
 set LLM_HUNG=
-if defined GPU (
-  echo The AI model is still loading after %LOAD_TIMEOUT% s - leaving it running.
-  set LLM_READY=slow
-  goto watch
-)
+if defined GPU goto llm_slow
+if "%LLM_VRAM%"=="0" goto llm_slow
 set "FAIL_WHY=AI not ready after %LOAD_TIMEOUT% s"
 set LLM_UP=
 taskkill /f /im llamafile.exe >nul 2>&1
@@ -164,10 +166,16 @@ for /f "usebackq tokens=1,* delims==" %%a in (`%PICK% 2^>nul`) do (
 if not defined PICKED (
   rem PowerShell unavailable: keep the model that was running.
   set "MODEL=%LAST_MODEL%"
+  set GPU_MB=0
   if not defined CTX set CTX=4096
   set "REASON=GPU mode failed, running on the CPU"
 )
 call :start_llm
+goto watch
+
+:llm_slow
+echo The AI model is still loading after %LOAD_TIMEOUT% s - leaving it running (no restart).
+set LLM_WARNED=1
 goto watch
 
 :llm_dead
@@ -184,7 +192,7 @@ if not errorlevel 1 (
   echo   AI model ready.
   exit /b 0
 )
-if !LLM_AGE! GEQ %LOAD_TIMEOUT% set LLM_HUNG=1
+if not defined LLM_WARNED if !LLM_AGE! GEQ %LOAD_TIMEOUT% set LLM_HUNG=1
 exit /b 0
 
 :start_llm
@@ -205,6 +213,10 @@ set "LAST_MODEL=%MODEL%"
 set LLM_UP=1
 set LLM_AGE=0
 set LLM_HUNG=
+set LLM_WARNED=
+rem GPU memory pick-model.ps1 saw for this start; 0 = no GPU attempt (no GPU, GPU=disable, or unknown).
+set "LLM_VRAM=%GPU_MB%"
+if not defined LLM_VRAM set LLM_VRAM=0
 set LLM_READY=
 if not defined HAVE_CURL set LLM_READY=unknown
 exit /b 0

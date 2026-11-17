@@ -62,7 +62,14 @@ gpu_args(){ # llamafile flags for the current CPU/GPU mode (values validated abo
   echo "$_a"
 }
 
-auto_gpu(){ [ -z "${GPU:-}" ]; } # GPU/auto mode with no backend pinned by GPU=... -> may fall back to the CPU
+# CPU fallback only after a real GPU attempt: GPU/auto mode with no backend pinned by GPU=..., and a GPU
+# device in use - pick-model saw GPU memory at this start, or llamafile's log names a GPU device or
+# offloaded layers. With no GPU (or GPU=disable) a slow load is just slow: never restart it.
+gpu_in_log(){
+  grep -Eqi 'ggml_vulkan: found [1-9]|^ *vulkan[0-9]+ *:|ggml_cuda_init: found [1-9]|offloaded [1-9][0-9]*/[0-9]+ layers to gpu' \
+    "$LOG/llamafile.log" 2>/dev/null
+}
+gpu_attempt(){ [ -z "${GPU:-}" ] && { [ "${LLM_VRAM:-0}" -gt 0 ] || gpu_in_log; }; }
 
 health_ok(){ # 0 = ready, 1 = not (yet), 2 = no curl/wget to ask with
   if command -v curl >/dev/null 2>&1; then curl -sf -m 2 -o /dev/null "$HEALTH_URL"
@@ -79,7 +86,8 @@ start_llm(){
   DISABLE_VULKAN_OBS_CAPTURE="$DISABLE_VULKAN_OBS_CAPTURE" VK_LOADER_LAYERS_DISABLE="$VK_LOADER_LAYERS_DISABLE" \
   sh "$KIT/bin/llamafile.exe" --server -m "$MODEL" ${MMPROJ:+--mmproj "$MMPROJ"} \
      --host "$BIND" --port 8080 -c "$CTX" --reasoning "$REASONING" $_ga >"$LOG/llamafile.log" 2>&1 &
-  LLM_PID=$!; LLM_T0=$(date +%s); LLM_READY=""; LLM_TIMEOUT=$(pick_load_timeout)
+  LLM_PID=$!; LLM_T0=$(date +%s); LLM_READY=""; LLM_WARNED=""; LLM_TIMEOUT=$(pick_load_timeout)
+  LLM_VRAM="${_vram:-0}"   # GPU memory pick_model saw for this start (0: no GPU, or GPU=disable)
   write_status
 }
 
@@ -97,10 +105,10 @@ cpu_fallback(){ # $1 = what went wrong in GPU mode
 # a GPU is a driver/Vulkan/ROCm failure or running out of GPU memory, so retry once on the CPU,
 # re-picking the model against RAM (the GPU-sized pick may not fit RAM). Later switches stay on the CPU;
 # the home page's "Use CPU only" toggle (off) or a restart tries the GPU again. Not done when you
-# chose the GPU backend yourself with GPU=...
+# chose the GPU backend yourself with GPU=..., or when no GPU was in use (see gpu_attempt).
 llm_exited(){
   wait "$LLM_PID" 2>/dev/null; _st=$?; LLM_PID=""
-  if auto_gpu; then
+  if gpu_attempt; then
     cpu_fallback "AI exited with code $_st"
   else
     echo "The AI model stopped (exit code $_st). Last lines of $LOG/llamafile.log:"
@@ -109,18 +117,19 @@ llm_exited(){
   fi
 }
 
-# Still loading? A GPU start that never answers /health within LLM_TIMEOUT (a hang, not an exit) is
-# stopped and retried on the CPU. A slow CPU start (or GPU=... set by you) is only reported.
+# Still loading? A GPU start (GPU device in use) that never answers /health within LLM_TIMEOUT - a hang,
+# not an exit - is stopped and retried on the CPU. Any other slow start (CPU only, no GPU, or GPU=...
+# set by you) is reported once and left running; we keep polling so "ready" is still printed.
 llm_check_ready(){
   [ -n "$LLM_PID" ] && [ -z "$LLM_READY" ] || return 0
   health_ok; _h=$?
   if [ $_h -eq 0 ]; then LLM_READY=1; echo "AI model ready after $(( $(date +%s) - LLM_T0 )) s."; return 0; fi
   if [ $_h -eq 2 ]; then LLM_READY=unknown; return 0; fi  # no curl/wget: the exit watch still works
-  [ $(( $(date +%s) - LLM_T0 )) -ge "$LLM_TIMEOUT" ] || return 0
-  if auto_gpu; then
+  [ -z "$LLM_WARNED" ] && [ $(( $(date +%s) - LLM_T0 )) -ge "$LLM_TIMEOUT" ] || return 0
+  if gpu_attempt; then
     stop_llm; cpu_fallback "AI not ready after $LLM_TIMEOUT s"
   else
-    LLM_READY=slow; echo "The AI model is still loading after $LLM_TIMEOUT s - leaving it running."
+    LLM_WARNED=1; echo "The AI model is still loading after $LLM_TIMEOUT s - leaving it running (no restart)."
   fi
 }
 start_llm

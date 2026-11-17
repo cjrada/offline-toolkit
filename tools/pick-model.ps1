@@ -6,7 +6,9 @@
 # Prints KEY=VALUE lines (MODEL, MMPROJ, CTX, REASON) for start.bat. Respects $env:MODEL / CTX / GPU.
 # $env:GPU_FALLBACK=1 (start.bat sets it with GPU=disable after llamafile exited in GPU mode) notes the
 # fallback in REASON and models.json. $env:LLM_RUN (start counter) is copied into models.json.
-# Also prints LOAD_TIMEOUT: $env:HEALTH_TIMEOUT, else 60 s + 1 s per 50 MB of model.
+# Also prints LOAD_TIMEOUT: $env:HEALTH_TIMEOUT, else 60 s + 1 s per 50 MB of model, and GPU_MB: the GPU
+# memory seen for this pick (0 = no GPU, or GPU=disable); start.bat only falls back to the CPU after a
+# GPU attempt, i.e. when GPU_MB > 0.
 #   -Json FILE         also write the home page's www\models.json
 #   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server): line 1 must equal
 #                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\, optional line 3
@@ -123,3 +125,4 @@ if ($Json) {
 "REASON=$reason"
 $loadTimeout = if ($env:HEALTH_TIMEOUT -match '^[0-9]+$') { [int64]$env:HEALTH_TIMEOUT } else { 60 + [int64][math]::Floor((SizeMB (Get-Item -LiteralPath $model)) / 50) }
 "LOAD_TIMEOUT=$loadTimeout"
+"GPU_MB=$vramMB"

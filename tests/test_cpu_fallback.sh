@@ -4,7 +4,9 @@
 #    DISABLE_VULKAN_OBS_CAPTURE=1 / VK_LOADER_LAYERS_DISABLE=~implicit~ (OBS Vulkan hook crash);
 #    FA / NGL / GPU overrides honoured
 #  * llamafile exiting in GPU mode, or never answering /health, is retried once on the CPU
-#    with the model re-picked against RAM (not when GPU=... was set by hand);
+#    with the model re-picked against RAM - but only after a real GPU attempt (GPU memory seen, or
+#    llamafile's log names a GPU device), never when GPU=... was set by hand;
+#    a slow load with no GPU / on the CPU is reported and left running (no --gpu disable restart);
 #    CPU-mode exits are reported without a restart loop
 #  * the home page's "Use CPU only" toggle (switch request line 3: cpu=on / cpu=off)
 # Usage: sh tests/test_cpu_fallback.sh      (needs curl, for the file:// health check)
@@ -17,7 +19,8 @@ fail=0
 ok(){ echo "ok   $1"; }
 bad(){ echo "FAIL $1"; fail=1; }
 
-mkkit() { # dir, behaviour on GPU, behaviour on CPU   (run | exit | hang)
+mkkit() { # dir, behaviour on GPU, behaviour on CPU
+  # run | exit | hang | slow (healthy after 6 s) | vkexit (logs a Vulkan device, then exits)
   K="$1"; mkdir -p "$K/tools" "$K/bin/linux" "$K/models" "$K/www" "$K/tmp"
   cp "$HERE/start.sh" "$K/"; cp "$HERE/tools/pick-model.sh" "$K/tools/"
   truncate -s 1100M "$K/models/qwen3-1.7b-q4_k_m.gguf"
@@ -30,7 +33,13 @@ mkkit() { # dir, behaviour on GPU, behaviour on CPU   (run | exit | hang)
 rm -f "$K/healthy"; echo "\$*" >>"$K/calls"; echo \$\$ >>"$K/pids"
 echo "\${DISABLE_VULKAN_OBS_CAPTURE:-unset} \${VK_LOADER_LAYERS_DISABLE:-unset}" >>"$K/env"
 case " \$* " in *" --gpu disable "*) m=$3 ;; *) m=$2 ;; esac
-case \$m in run) : >"$K/healthy"; exec sleep 600 ;; hang) exec sleep 600 ;; *) exit 3 ;; esac
+case \$m in
+  run) : >"$K/healthy"; exec sleep 600 ;;
+  hang) exec sleep 600 ;;
+  slow) (sleep 6; : >"$K/healthy") & exec sleep 600 ;;
+  vkexit) echo "ggml_vulkan: Found 1 Vulkan devices:"; echo "Vulkan0 : Some GPU (8192 MiB, 7000 MiB free)"; exit 11 ;;
+  *) exit 3 ;;
+esac
 STUB
 }
 
@@ -97,6 +106,36 @@ stop_kit "$K"
 K="$T/d"; mkkit "$K" run hang; run_kit "$K" GPU=disable HEALTH_TIMEOUT=2; wait_calls "$K" 2 5
 [ "$(calls "$K")" -eq 1 ] && grep -q "still loading after 2 s" "$K/out" \
   && ok "slow CPU start reported, not restarted" || bad "slow CPU: $(cat "$K/calls") / $(cat "$K/out")"
+stop_kit "$K"
+
+# 4b. No GPU detected (VRAM 0), GPU/auto mode: a slow load is NOT a GPU failure - no --gpu disable
+#     restart; reported once, polling continues and "ready" is printed when it comes
+K="$T/d2"; mkkit "$K" slow run; run_kit "$K" VRAM_MB=0 HEALTH_TIMEOUT=2; wait_calls "$K" 2 8
+[ "$(calls "$K")" -eq 1 ] && ! has "$(call "$K" 1)" "--gpu disable" && ok "no GPU: slow load not restarted with --gpu disable" \
+  || bad "no GPU slow: $(cat "$K/calls")"
+grep -q "still loading after 2 s - leaving it running (no restart)" "$K/out" && ! grep -q "fell back" "$K/out" \
+  && ok "no GPU: timeout reported, no fallback" || bad "out: $(cat "$K/out")"
+[ "$(grep -c "still loading" "$K/out")" -eq 1 ] && grep -q "AI model ready" "$K/out" \
+  && ok "no GPU: reported once, then ready" || bad "out: $(cat "$K/out")"
+kill -0 "$(sed -n 1p "$K/pids")" 2>/dev/null && ok "no GPU: slow process still running" || bad "slow process was killed"
+stop_kit "$K"
+# 4c. No GPU detected and the load hangs: never restarted
+K="$T/d3"; mkkit "$K" hang run; run_kit "$K" VRAM_MB=0 HEALTH_TIMEOUT=2; wait_calls "$K" 2 6
+[ "$(calls "$K")" -eq 1 ] && ! grep -q "fell back" "$K/out" && ok "no GPU: hanging load not restarted" || bad "no GPU hang: $(cat "$K/calls")"
+stop_kit "$K"
+# 4d. No GPU detected and llamafile exits: reported, no pointless --gpu disable restart
+K="$T/d4"; mkkit "$K" exit run; run_kit "$K" VRAM_MB=0; wait_calls "$K" 2 6
+[ "$(calls "$K")" -eq 1 ] && grep -q "The AI model stopped (exit code 3)" "$K/out" && ! grep -q "fell back" "$K/out" \
+  && ok "no GPU: exit reported, no fallback" || bad "no GPU exit: $(cat "$K/calls") / $(cat "$K/out")"
+stop_kit "$K"
+# 4e. VRAM not detected, but llamafile's log shows it used a Vulkan device before exiting: GPU attempt -> fallback
+K="$T/d5"; mkkit "$K" vkexit run; run_kit "$K" VRAM_MB=0; wait_calls "$K" 2
+has "$(call "$K" 2)" "--gpu disable" && grep -q "GPU start failed (AI exited with code 11) - fell back to the CPU" "$K/out" \
+  && ok "GPU device in the log: exit falls back" || bad "vkexit: $(cat "$K/calls") / $(cat "$K/out")"
+stop_kit "$K"
+# 4f. GPU in use and it hangs (VRAM seen): still falls back (same as 3, with a GPU-sized load timeout cap)
+K="$T/d6"; mkkit "$K" slow run; run_kit "$K" HEALTH_TIMEOUT=2; wait_calls "$K" 2
+has "$(call "$K" 2)" "--gpu disable" && ok "GPU in use: slow/hung load still falls back after the timeout" || bad "gpu slow: $(cat "$K/calls")"
 stop_kit "$K"
 
 # 5. "Use CPU only" toggle on a healthy GPU run: on -> --gpu disable, off -> GPU flags again

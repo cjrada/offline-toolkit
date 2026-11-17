@@ -10,6 +10,8 @@ step with it:
   VK_LOADER_LAYERS_DISABLE=~implicit~, keeping values the user set) before the first llamafile start.
 * GPU starts pass `-fa %FA_GPU%` with FA defaulting to off; CPU starts pass `--gpu disable`.
   The superseded `-fit` workaround is gone.
+* CPU fallback only after a real GPU attempt: GPU_MB (GPU memory pick-model.ps1 saw) > 0 and GPU not
+  set by hand. Otherwise an exit is reported and a slow load is reported once and left running.
 * The watch loop notices a dead llamafile with tasklist (start "..." hides the exit code) and polls
   /health with curl.exe; the CPU fallback prints one "fell back to the CPU" line and is skipped
   when GPU was set by hand.
@@ -68,12 +70,23 @@ check("exit watch uses tasklist for llamafile.exe",
 check("health poll with curl.exe on /health", re.search(r'curl\.exe -sf -m 2 -o nul "%HEALTH_URL%"', body) is not None)
 check("health URL defaults to 127.0.0.1:8080/health",
       first(r"^if not defined HEALTH_URL set HEALTH_URL=http://127\.0\.0\.1:8080/health$") >= 0)
-check("timeout leads to llm_hung", "if !LLM_AGE! GEQ %LOAD_TIMEOUT% set LLM_HUNG=1" in body and "if defined LLM_HUNG goto llm_hung" in body)
+check("timeout leads to llm_hung (once)", "if not defined LLM_WARNED if !LLM_AGE! GEQ %LOAD_TIMEOUT% set LLM_HUNG=1" in body
+      and "if defined LLM_HUNG goto llm_hung" in body)
 check("one clear fallback line", body.count("fell back to the CPU") == 1)
 seg = text[text.index(":llm_exited"):text.index(":llm_hung")]
 check("no automatic fallback when GPU was set by hand (exit)", "if defined GPU goto llm_dead" in seg)
+check("no fallback after an exit with no GPU in use", '\r\nif "%LLM_VRAM%"=="0" goto llm_dead\r\n' in seg)
+check("exit fallback only after both checks", seg.index('"%LLM_VRAM%"=="0"') < seg.index("goto cpu_fallback"))
 seg = text[text.index(":llm_hung"):text.index(":cpu_fallback")]
-check("no automatic fallback when GPU was set by hand (hang)", re.search(r"if defined GPU \(", seg) is not None)
+check("no automatic fallback when GPU was set by hand (hang)", "\r\nif defined GPU goto llm_slow\r\n" in seg)
+check("slow load with no GPU in use is not restarted", '\r\nif "%LLM_VRAM%"=="0" goto llm_slow\r\n' in seg
+      and seg.index("goto llm_slow") < seg.index("taskkill"))
+seg = text[text.index(":llm_slow"):text.index(":llm_dead")]
+check("llm_slow reports once and keeps llamafile running",
+      "set LLM_WARNED=1" in seg and "goto watch" in seg and "taskkill" not in seg and "start_llm" not in seg)
+seg = text[text.index(":start_llm"):]
+check("each start records the GPU memory seen (default 0)",
+      'set "LLM_VRAM=%GPU_MB%"' in seg and "if not defined LLM_VRAM set LLM_VRAM=0" in seg and "set LLM_WARNED=" in seg)
 seg = text[text.index(":cpu_fallback"):text.index(":llm_dead")]
 check("fallback sets GPU=disable and GPU_FALLBACK=1, re-picks", all(s in seg for s in ("set GPU=disable", "set GPU_FALLBACK=1", "%PICK%", "call :start_llm")))
 
