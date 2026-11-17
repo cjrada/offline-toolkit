@@ -10,6 +10,10 @@
 # from the home page or with MODEL=models/spare/x.gguf. Projectors pair by name: x.gguf + x.mmproj.gguf.
 # Overrides: MODEL, CTX, GPU=disable (ignore the GPU), RAM_MB / VRAM_MB (pretend sizes, for tests),
 # HEADROOM_MB (default 4096), GPU_HEADROOM_MB (default 1024).
+# GPU_FALLBACK=1 (set by start.sh after llamafile exited in GPU mode; use with GPU=disable) notes the
+# fallback in PICK_REASON and models.json. LLM_RUN (start counter) is copied into models.json so the
+# home page can tell when a restart has happened.
+# Load timeout (pick_load_timeout): HEALTH_TIMEOUT, else 60 s + 1 s per 50 MB of model (slow USB sticks).
 # Show the decision and the list without starting anything:  sh tools/pick-model.sh [--json]
 
 pick_ram_mb() {
@@ -86,6 +90,8 @@ pick_model() {
       MODEL="$_small"; _fit=tight; PICK_REASON="nothing fits ${_ram} MB RAM comfortably; smallest model, 4k context (slow)"
     fi
   fi
+  if [ "${GPU_FALLBACK:-}" = 1 ]; then PICK_REASON="GPU mode failed, running on the CPU; $PICK_REASON"
+  elif [ "${GPU:-}" = disable ]; then PICK_REASON="CPU only; $PICK_REASON"; fi
   case "$_fit" in gpu|ram) CTX="${CTX:-8192}" ;; *) CTX="${CTX:-4096}" ;; esac
   MMPROJ=""
   _mm="${MODEL%.gguf}.mmproj.gguf"
@@ -97,8 +103,10 @@ pick_model() {
 # listed, so no escaping is needed; others still work with MODEL=.
 pick_models_json() {
   _dir="${MODELS_DIR:-models}"
-  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"switch_port":8079,"switch_token":"%s","models":[' \
-    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram" "$(printf '%s' "${SWITCH_TOKEN:-}" | tr -dc '0-9a-f')"
+  printf '{"current":"%s","ctx":%s,"reason":"%s","ram_mb":%s,"vram_mb":%s,"gpu_fallback":%s,"cpu_only":%s,"run":%s,"switch_port":8079,"switch_token":"%s","models":[' \
+    "$MODEL" "$CTX" "$PICK_REASON" "$_ram" "$_vram" "$([ "${GPU_FALLBACK:-}" = 1 ] && echo true || echo false)" \
+    "$([ "${GPU:-}" = disable ] && echo true || echo false)" "$(printf '%s' "${LLM_RUN:-0}" | tr -dc '0-9' | grep . || echo 0)" \
+    "$(printf '%s' "${SWITCH_TOKEN:-}" | tr -dc '0-9a-f')"
   _sep=""
   for _f in "$_dir"/*.gguf "$_dir"/spare/*.gguf; do
     pick_is_model "$_f" || continue
@@ -119,6 +127,16 @@ pick_valid_request() {
     models/*/*/*) return 1 ;;
     models/spare/*.gguf|models/*.gguf) pick_is_model "$1" ;;
     *) return 1 ;;
+  esac
+}
+
+# Optional third line of a switch request: empty (keep the current CPU/GPU mode), cpu=on or cpu=off.
+pick_valid_cpu_flag() { case "$1" in ''|cpu=on|cpu=off) return 0 ;; *) return 1 ;; esac; }
+
+pick_load_timeout() { # seconds to wait for /health before giving up on a GPU start
+  case "${HEALTH_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo $((60 + $(pick_size_mb "$MODEL") / 50)) ;;
+    *) echo "$HEALTH_TIMEOUT" ;;
   esac
 }
 

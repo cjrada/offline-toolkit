@@ -32,4 +32,33 @@ for r in '../x.gguf' 'models/qwen3-8b-q4_k_m.mmproj.gguf' 'models/missing.gguf' 
   printf '%s\n%s' "$SWITCH_TOKEN" "$r" >req.txt
   [ -z "$(run 7800 0 -RequestFile req.txt)" ] && echo "ok   reject $r" || { echo "FAIL accepted $r"; fail=1; }
 done
+# CPU fallback (start.bat sets GPU=disable GPU_FALLBACK=1 after llamafile exits in GPU mode)
+out=$(env -u MODEL -u CTX GPU=disable GPU_FALLBACK=1 RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 -Json www/models.json 2>/dev/null | tr '\r\n' '  ')
+expect "GPU fallback re-picks for RAM" "$out" 'MODEL=models\qwen3-1.7b-q4_k_m.gguf MMPROJ= CTX=4096 REASON=GPU mode failed, running on the CPU;'
+python3 -c 'import json;d=json.load(open("www/models.json"));assert d["gpu_fallback"] is True and d["vram_mb"]==0' \
+  && echo "ok   models.json gpu_fallback" || { echo "FAIL models.json gpu_fallback"; fail=1; }
+# "Use CPU only" toggle: optional third request line, validated exactly like sh pick_valid_cpu_flag
+for f in on off; do
+  printf '%s\nmodels/qwen3-8b-q4_k_m.gguf\ncpu=%s\n' "$SWITCH_TOKEN" "$f" >req.txt
+  expect "check cpu=$f" "$(run 3900 12288 -RequestFile req.txt -CheckOnly)" "REQ_MODEL=models\qwen3-8b-q4_k_m.gguf REQ_CPU=$f"
+done
+printf '%s\nmodels/qwen3-8b-q4_k_m.gguf\n' "$SWITCH_TOKEN" >req.txt
+expect "check without flag keeps mode" "$(run 3900 12288 -RequestFile req.txt -CheckOnly)" 'REQ_CPU=keep'
+for f in cpu=ON cpu= ' cpu=on' 'cpu=on;calc' gpu=off cpu=auto; do
+  printf '%s\nmodels/qwen3-8b-q4_k_m.gguf\n%s\n' "$SWITCH_TOKEN" "$f" >req.txt
+  [ -z "$(run 3900 12288 -RequestFile req.txt -CheckOnly)" ] && echo "ok   reject cpu flag '$f'" || { echo "FAIL accepted cpu flag '$f'"; fail=1; }
+done
+printf 'wrong\nmodels/qwen3-8b-q4_k_m.gguf\ncpu=on\n' >req.txt
+[ -z "$(run 3900 12288 -RequestFile req.txt -CheckOnly)" ] && echo "ok   reject cpu toggle with wrong token" || { echo "FAIL toggle wrong token"; fail=1; }
+# CPU only chosen on the page (start.bat sets GPU=disable): VRAM ignored, reason + models.json say so
+out=$(env -u MODEL -u CTX GPU=disable LLM_RUN=4 RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 -Json www/models.json 2>/dev/null | tr '\r\n' '  ')
+expect "CPU only re-picks for RAM" "$out" 'MODEL=models\qwen3-1.7b-q4_k_m.gguf MMPROJ= CTX=4096 REASON=CPU only;'
+python3 -c 'import json;d=json.load(open("www/models.json"));assert d["cpu_only"] is True and d["gpu_fallback"] is False and d["run"]==4 and d["switch_port"]==8079 and len(d["switch_token"])==32' \
+  && echo "ok   models.json cpu_only / run" || { echo "FAIL models.json cpu_only"; fail=1; }
+expect "load timeout from size" "$(run 3900 12288)" 'LOAD_TIMEOUT=160'
+expect "HEALTH_TIMEOUT override" "$(HEALTH_TIMEOUT=30 run 3900 12288)" 'LOAD_TIMEOUT=30'
+# GPU_MB: start.bat falls back to the CPU only after a GPU attempt (GPU_MB > 0)
+expect "GPU_MB with a GPU"       "$(run 3900 12288)" 'GPU_MB=12288'
+expect "GPU_MB with no GPU"      "$(run 3900 0)"     'GPU_MB=0'
+expect "GPU_MB with GPU=disable" "$(env -u MODEL -u CTX GPU=disable RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 2>/dev/null | tr '\r\n' '  ')" 'GPU_MB=0'
 exit $fail

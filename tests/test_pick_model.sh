@@ -55,6 +55,21 @@ for r in ../etc/passwd models/../x.gguf /etc/x.gguf models/qwen3-8b-q4_k_m.mmpro
   (cd "$T" && sh -c ". '$HERE/tools/pick-model.sh'; pick_valid_request \"\$1\"" _ "$r") && bad "accepted invalid $r" || ok "reject $r"
 done
 
+# Optional third line of a switch request (home-page "Use CPU only" toggle)
+for f in '' cpu=on cpu=off; do
+  sh -c ". '$HERE/tools/pick-model.sh'; pick_valid_cpu_flag \"\$1\"" _ "$f" && ok "accept cpu flag '$f'" || bad "rejected cpu flag '$f'"
+done
+for f in cpu=ON cpu= cpu=on1 ' cpu=on' 'cpu=on;reboot' gpu=off cpu=auto 'cpu=off
+x'; do
+  sh -c ". '$HERE/tools/pick-model.sh'; pick_valid_cpu_flag \"\$1\"" _ "$f" && bad "accepted cpu flag '$f'" || ok "reject cpu flag '$f'"
+done
+
+# load timeout: 60 s + 1 s per 50 MB, or HEALTH_TIMEOUT
+to=$(cd "$T" && MODEL=models/qwen3-8b-q4_k_m.gguf sh -c ". '$HERE/tools/pick-model.sh'; pick_load_timeout")
+[ "$to" = 160 ] && ok "load timeout scales with model size" || bad "load timeout: $to"
+to=$(cd "$T" && MODEL=models/qwen3-8b-q4_k_m.gguf HEALTH_TIMEOUT=30 sh -c ". '$HERE/tools/pick-model.sh'; pick_load_timeout")
+[ "$to" = 30 ] && ok "HEALTH_TIMEOUT override" || bad "HEALTH_TIMEOUT: $to"
+
 # models.json is valid JSON and lists spare models but not projectors
 json=$(cd "$T" && SWITCH_TOKEN='ab12<"x' RAM_MB=7800 VRAM_MB=0 sh -c ". '$HERE/tools/pick-model.sh'; pick_model && pick_models_json")
 echo "$json" | python3 -c '
@@ -64,5 +79,6 @@ assert d["switch_token"] == "ab12", d["switch_token"]   # only hex survives, so 
 assert "tiny" in names and not any("mmproj" in n for n in names), names
 assert {m["name"]: m["fit"] for m in d["models"]}["qwen3-8b-q4_k_m"] == "tight"
 assert {m["name"]: m["vision"] for m in d["models"]}["qwen3-8b-q4_k_m"] is True
+assert d["cpu_only"] is False and d["gpu_fallback"] is False and d["run"] == 0, d
 ' && ok "models.json valid" || bad "models.json: $json"
 exit $fail
