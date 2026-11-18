@@ -105,6 +105,9 @@ jobs:
       - name: Build small kit
         env:
           VERSION: ${{ steps.cfg.outputs.version }}
+          # The runner's Go is older than go-pmtiles needs. Pin the toolchain go fetches (checksum-verified
+          # by sum.golang.org) to the version in cloudbuild.yaml's golang image, so both builders match.
+          GOTOOLCHAIN: go1.25.14
         run: |
           "$WORK/venv/bin/python" tools/build_kit.py --tier small --frozen --version "$VERSION" \
             --out "$WORK/offline-toolkit-small" --cache "$WORK/cache" --zip "$WORK/offline-toolkit-small-$VERSION.zip"

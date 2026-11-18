@@ -169,6 +169,7 @@ Notes:
 
 ```sh
 sudo apt install poppler-utils golang-go python3-venv
+go version   # go-pmtiles needs Go >= 1.25; if older, install a newer Go or `export GOTOOLCHAIN=go1.25.14`
 python3 -m venv .venv && .venv/bin/pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt
 .venv/bin/python tools/build_kit.py --zip                    # small -> dist/offline-toolkit-small/ (+ zip)
 .venv/bin/python tools/build_kit.py --tier medium --with post-disaster   # personal use only; cannot be published

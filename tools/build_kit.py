@@ -301,6 +301,26 @@ def extract(it, archive, out):
     log(f"  extracted {n} file(s) -> {dest}")
 
 
+def go_version_tuple(v):
+    """'go1.25.14' / '1.25' -> (1, 25, 14) / (1, 25, 0)."""
+    m = re.match(r"(?:go)?(\d+)\.(\d+)(?:\.(\d+))?", v.strip())
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def check_go_version(t, env):
+    """Fail clearly, before `go install`, when the Go toolchain is older than the module needs and the go
+    command is not allowed to fetch a newer one (GOTOOLCHAIN=local, as in the official golang images)."""
+    need = t.get("go")
+    if not need:
+        return
+    r = subprocess.run(["go", "env", "GOVERSION", "GOTOOLCHAIN"], capture_output=True, text=True, env=env)
+    have, toolchain = (r.stdout.splitlines() + ["", ""])[:2]
+    hv, nv = go_version_tuple(have), go_version_tuple(need)
+    if r.returncode == 0 and hv and nv and hv < nv and toolchain.split("+")[0] == "local":
+        die(f"{t['module']}@{t['version']} needs Go >= {need}, but `go` is {have} with GOTOOLCHAIN=local. "
+            f"Install Go {need} or newer, set GOTOOLCHAIN=go{need} (or newer), or pass --pmtiles /path/to/pmtiles")
+
+
 def pmtiles_tool(m, cache, given):
     if given:
         return given
@@ -313,9 +333,10 @@ def pmtiles_tool(m, cache, given):
     if not os.path.exists(exe):
         if not shutil.which("go"):
             die("the map needs go-pmtiles: install Go, pass --pmtiles /path/to/pmtiles, or use --skip map-australia")
-        log(f"  building {t['module']}@{t['version']} with go install (checksum-verified)")
         env = {k: v for k, v in os.environ.items() if k not in ("GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOPRIVATE", "GOFLAGS")}
         env.update(GOBIN=gobin, GOSUMDB="sum.golang.org")  # never let the environment turn checksum verification off
+        check_go_version(t, env)
+        log(f"  building {t['module']}@{t['version']} with go install (checksum-verified)")
         subprocess.run(["go", "install", f"{t['module']}@{t['version']}"], check=True, env=env)
     return exe
 
