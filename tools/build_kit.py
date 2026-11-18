@@ -301,6 +301,38 @@ def extract(it, archive, out):
     log(f"  extracted {n} file(s) -> {dest}")
 
 
+def go_version_tuple(v):
+    """'go1.25.14' / '1.25' -> (1, 25, 14) / (1, 25, 0)."""
+    m = re.match(r"(?:go)?(\d+)\.(\d+)(?:\.(\d+))?", v.strip())
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def check_go_version(t, env):
+    """Fail clearly, before `go install`, when the Go toolchain is older than the module needs and the go
+    command will not download a newer one: GOTOOLCHAIN=local (as in the official golang images), path,
+    local+path, goX.Y.Z+path, or a pinned goX.Y.Z below the minimum. Only auto / <name>+auto can fetch."""
+    need = t.get("go")
+    if not need:
+        return
+    go = shutil.which("go", path=env.get("PATH")) or "go"  # which() honours PATHEXT, so go.bat/go.cmd work on Windows
+    r = subprocess.run([go, "env", "GOVERSION", "GOTOOLCHAIN"], capture_output=True, text=True, env=env)
+    have, toolchain = [x.strip() for x in (r.stdout.splitlines() + ["", ""])[:2]]
+    hv, nv = go_version_tuple(have), go_version_tuple(need)
+    if r.returncode != 0 or not hv or not nv or not toolchain or hv >= nv:
+        return
+    base, _, mode = toolchain.partition("+")
+    if base in ("auto", "path"):  # shorthand for local+auto / local+path
+        base, mode = "local", base
+    if mode == "auto":
+        return
+    pinned = go_version_tuple(base) if base.startswith("go") else None
+    if pinned and pinned >= nv:
+        return
+    die(f"{t['module']}@{t['version']} needs Go >= {need}, but `go` is {have} with GOTOOLCHAIN={toolchain}, "
+        f"which will not download a newer toolchain. "
+        f"Install Go {need} or newer, set GOTOOLCHAIN=go{need} (or newer), or pass --pmtiles /path/to/pmtiles")
+
+
 def pmtiles_tool(m, cache, given):
     if given:
         return given
@@ -313,9 +345,10 @@ def pmtiles_tool(m, cache, given):
     if not os.path.exists(exe):
         if not shutil.which("go"):
             die("the map needs go-pmtiles: install Go, pass --pmtiles /path/to/pmtiles, or use --skip map-australia")
-        log(f"  building {t['module']}@{t['version']} with go install (checksum-verified)")
         env = {k: v for k, v in os.environ.items() if k not in ("GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOPRIVATE", "GOFLAGS")}
         env.update(GOBIN=gobin, GOSUMDB="sum.golang.org")  # never let the environment turn checksum verification off
+        check_go_version(t, env)
+        log(f"  building {t['module']}@{t['version']} with go install (checksum-verified)")
         subprocess.run(["go", "install", f"{t['module']}@{t['version']}"], check=True, env=env)
     return exe
 

@@ -146,7 +146,7 @@ python3 tools/build_kit.py --tier medium        # or large; each tier includes t
 python3 tools/build_kit.py --lock               # pin new or changed downloads, then review and commit
 ```
 
-Needs python3, `pdftotext` (poppler-utils), Go (for go-pmtiles, the map extractor) and `libzim`
+Needs python3, `pdftotext` (poppler-utils), Go 1.25 or newer (for go-pmtiles, the map extractor) and `libzim`
 (`pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt`, to pull three
 manuals out of the pinned zimgit ZIMs). Prebuilt kits are
 published to Google Cloud Storage by the manually started `publish-kit` workflow. See

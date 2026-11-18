@@ -230,5 +230,57 @@ class RealManifest(unittest.TestCase):
         self.assertTrue(all(i.get("optional") for i in m["items"] if i["id"] in nonfree), "non-redistributable items must be optional")
 
 
+class GoVersion(unittest.TestCase):
+    """go-pmtiles needs a minimum Go (manifest tools.go-pmtiles.go). Both builders must provide it."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import build_kit
+        self.bk = build_kit
+        self.tool = json.load(open(os.path.join(ROOT, "tools", "kit-manifest.json")))["tools"]["go-pmtiles"]
+        self.need = build_kit.go_version_tuple(self.tool["go"])
+
+    def test_cloudbuild_golang_image_meets_requirement(self):
+        # The image is pinned by digest; the trailing tag comment says which golang tag that digest is.
+        import re
+        text = open(os.path.join(ROOT, "cloudbuild.yaml")).read()
+        m = re.search(r"name: mirror\.gcr\.io/library/golang@sha256:[0-9a-f]{64}\s+#\s*(\d+\.\d+(?:\.\d+)?)-", text)
+        self.assertIsNotNone(m, "cloudbuild.yaml build step must use a digest-pinned golang image with a '# <ver>-<os>' comment")
+        self.assertGreaterEqual(self.bk.go_version_tuple(m.group(1)), self.need, "golang image too old for go-pmtiles")
+
+    def test_publish_workflow_toolchain_meets_requirement(self):
+        import re
+        text = open(os.path.join(ROOT, ".github", "workflows", "publish.yml")).read()
+        m = re.search(r"^\s*GOTOOLCHAIN:\s*go(\d+\.\d+\.\d+)\s*$", text, re.M)
+        self.assertIsNotNone(m, "publish.yml's small-kit build must pin GOTOOLCHAIN: go<x.y.z>")
+        self.assertGreaterEqual(self.bk.go_version_tuple(m.group(1)), self.need, "GOTOOLCHAIN too old for go-pmtiles")
+
+    def _check(self, goversion, toolchain):
+        # Stub `go` that prints `go env GOVERSION GOTOOLCHAIN` output: a batch file on Windows, sh elsewhere.
+        with tempfile.TemporaryDirectory() as d:
+            if os.name == "nt":
+                with open(os.path.join(d, "go.bat"), "w") as fh:
+                    fh.write(f"@echo off\r\necho {goversion}\r\necho {toolchain}\r\n")
+            else:
+                go = os.path.join(d, "go")
+                with open(go, "w") as fh:
+                    fh.write(f"#!/bin/sh\necho {goversion}\necho {toolchain}\n")
+                os.chmod(go, 0o755)
+            env = {**os.environ, "PATH": d + os.pathsep + os.environ.get("PATH", "")}
+            self.bk.check_go_version(self.tool, env)
+
+    def test_old_go_that_cannot_download_fails_clearly(self):
+        too_old = "go1.24.0"
+        for tc in ("local", "path", "local+path", too_old, too_old + "+path"):
+            with self.subTest(GOTOOLCHAIN=tc), self.assertRaises(SystemExit):
+                self._check("go1.24.13", tc)
+
+    def test_new_enough_or_switchable_go_passes(self):
+        self._check("go" + self.tool["go"], "local")
+        self._check("go" + self.tool["go"], "path")
+        for tc in ("auto", "local+auto", "go1.24.0+auto", "go" + self.tool["go"], "go" + self.tool["go"] + "+path"):
+            with self.subTest(GOTOOLCHAIN=tc):
+                self._check("go1.24.13", tc)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

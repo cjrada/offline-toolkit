@@ -36,7 +36,7 @@ steps:
         test "$$(git rev-parse HEAD)" = "$$COMMIT"
         df -h /workspace
   - id: build
-    name: mirror.gcr.io/library/golang@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac  # 1.24-bookworm
+    name: mirror.gcr.io/library/golang@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437  # 1.25-bookworm
     entrypoint: bash
     dir: src
     args:

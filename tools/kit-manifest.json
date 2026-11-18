@@ -13,7 +13,8 @@
     "go-pmtiles": {
       "module": "github.com/protomaps/go-pmtiles",
       "version": "v1.31.2",
-      "_note": "Built with `go install module@version`; the Go checksum database (sum.golang.org) verifies the source."
+      "go": "1.25.0",
+      "_note": "Built with `go install module@version`; the Go checksum database (sum.golang.org) verifies the source. go: the module's minimum Go (the `go` line of its go.mod); the golang image in cloudbuild.yaml and GOTOOLCHAIN in publish.yml must meet it (tests/test_build_kit.py checks)."
     }
   },
   "items": [
