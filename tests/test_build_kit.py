@@ -256,22 +256,31 @@ class GoVersion(unittest.TestCase):
         self.assertGreaterEqual(self.bk.go_version_tuple(m.group(1)), self.need, "GOTOOLCHAIN too old for go-pmtiles")
 
     def _check(self, goversion, toolchain):
+        # Stub `go` that prints `go env GOVERSION GOTOOLCHAIN` output: a batch file on Windows, sh elsewhere.
         with tempfile.TemporaryDirectory() as d:
-            go = os.path.join(d, "go")
-            with open(go, "w") as fh:
-                fh.write(f"#!/bin/sh\necho {goversion}\necho {toolchain}\n")
-            os.chmod(go, 0o755)
+            if os.name == "nt":
+                with open(os.path.join(d, "go.bat"), "w") as fh:
+                    fh.write(f"@echo off\r\necho {goversion}\r\necho {toolchain}\r\n")
+            else:
+                go = os.path.join(d, "go")
+                with open(go, "w") as fh:
+                    fh.write(f"#!/bin/sh\necho {goversion}\necho {toolchain}\n")
+                os.chmod(go, 0o755)
             env = {**os.environ, "PATH": d + os.pathsep + os.environ.get("PATH", "")}
             self.bk.check_go_version(self.tool, env)
 
-    def test_old_local_go_fails_clearly(self):
-        with self.assertRaises(SystemExit):
-            self._check("go1.24.13", "local")
+    def test_old_go_that_cannot_download_fails_clearly(self):
+        too_old = "go1.24.0"
+        for tc in ("local", "path", "local+path", too_old, too_old + "+path"):
+            with self.subTest(GOTOOLCHAIN=tc), self.assertRaises(SystemExit):
+                self._check("go1.24.13", tc)
 
     def test_new_enough_or_switchable_go_passes(self):
         self._check("go" + self.tool["go"], "local")
-        self._check("go1.24.13", "auto")
-
+        self._check("go" + self.tool["go"], "path")
+        for tc in ("auto", "local+auto", "go1.24.0+auto", "go" + self.tool["go"], "go" + self.tool["go"] + "+path"):
+            with self.subTest(GOTOOLCHAIN=tc):
+                self._check("go1.24.13", tc)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

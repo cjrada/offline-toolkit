@@ -309,16 +309,28 @@ def go_version_tuple(v):
 
 def check_go_version(t, env):
     """Fail clearly, before `go install`, when the Go toolchain is older than the module needs and the go
-    command is not allowed to fetch a newer one (GOTOOLCHAIN=local, as in the official golang images)."""
+    command will not download a newer one: GOTOOLCHAIN=local (as in the official golang images), path,
+    local+path, goX.Y.Z+path, or a pinned goX.Y.Z below the minimum. Only auto / <name>+auto can fetch."""
     need = t.get("go")
     if not need:
         return
-    r = subprocess.run(["go", "env", "GOVERSION", "GOTOOLCHAIN"], capture_output=True, text=True, env=env)
-    have, toolchain = (r.stdout.splitlines() + ["", ""])[:2]
+    go = shutil.which("go", path=env.get("PATH")) or "go"  # which() honours PATHEXT, so go.bat/go.cmd work on Windows
+    r = subprocess.run([go, "env", "GOVERSION", "GOTOOLCHAIN"], capture_output=True, text=True, env=env)
+    have, toolchain = [x.strip() for x in (r.stdout.splitlines() + ["", ""])[:2]]
     hv, nv = go_version_tuple(have), go_version_tuple(need)
-    if r.returncode == 0 and hv and nv and hv < nv and toolchain.split("+")[0] == "local":
-        die(f"{t['module']}@{t['version']} needs Go >= {need}, but `go` is {have} with GOTOOLCHAIN=local. "
-            f"Install Go {need} or newer, set GOTOOLCHAIN=go{need} (or newer), or pass --pmtiles /path/to/pmtiles")
+    if r.returncode != 0 or not hv or not nv or not toolchain or hv >= nv:
+        return
+    base, _, mode = toolchain.partition("+")
+    if base in ("auto", "path"):  # shorthand for local+auto / local+path
+        base, mode = "local", base
+    if mode == "auto":
+        return
+    pinned = go_version_tuple(base) if base.startswith("go") else None
+    if pinned and pinned >= nv:
+        return
+    die(f"{t['module']}@{t['version']} needs Go >= {need}, but `go` is {have} with GOTOOLCHAIN={toolchain}, "
+        f"which will not download a newer toolchain. "
+        f"Install Go {need} or newer, set GOTOOLCHAIN=go{need} (or newer), or pass --pmtiles /path/to/pmtiles")
 
 
 def pmtiles_tool(m, cache, given):
