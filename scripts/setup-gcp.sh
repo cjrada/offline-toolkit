@@ -16,6 +16,8 @@
 #     repository id N AND name cjrada/offline-toolkit, ref main or a v* tag, environment gcs-publish.
 #   * least-privilege grants: both SAs may CREATE objects in the bucket but not replace or delete them,
 #     except kits/<tier>/latest.json. kit-publisher may start Cloud Builds that run as kit-builder.
+#     kit-builder may also READ objects under cache/ (the shared download cache of Cloud Build runs; it
+#     writes them create-only like everything else). Nothing else can read the bucket.
 set -euo pipefail
 # Never prompt: any question gcloud would ask becomes an error, which set -e turns into a non-zero exit.
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
@@ -168,6 +170,11 @@ for sa in "$PUB" "$BLD"; do
   run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$sa" --role=roles/storage.objectUser \
     --condition="$LATEST_COND" >/dev/null
 done
+# Builder: read the download cache (cache/...). Writes stay create-only through objectCreator above, so
+# a cached file can never be replaced; every cached file is checked against its pinned sha256 before use.
+CACHE_COND="title=download-cache-read,expression=resource.name.startsWith(\"projects/_/buckets/$BUCKET/objects/cache/\")"
+run gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$BLD" --role=roles/storage.objectViewer \
+  --condition="$CACHE_COND" >/dev/null
 # Publisher: start builds and check their status, acting only as kit-builder.
 for role in roles/cloudbuild.builds.editor roles/serviceusage.serviceUsageConsumer; do
   run gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$PUB" --role="$role" --condition=None >/dev/null

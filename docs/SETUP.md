@@ -8,7 +8,7 @@ jobs in the protected `gcs-publish` environment (Workload Identity Federation).
 | Tier | Built on | Size (approx.) | How |
 |---|---|---|---|
 | small | GitHub runner | 6 GB | `publish-kit` workflow, or push a `v*` tag |
-| medium | Cloud Build (600 GB disk) | 40 GB | `publish-kit` workflow, tier = medium |
+| medium | Cloud Build (600 GB disk) | 42 GB | `publish-kit` workflow, tier = medium |
 | large | Cloud Build (600 GB disk) | 175 GB | `publish-kit` workflow, tier = large |
 
 ## 1. One-time Google Cloud setup
@@ -63,6 +63,7 @@ You can re-run it at any time. It only creates what is missing and resets the se
   | kit-publisher | `cloudbuild.builds.editor`, `serviceusage.serviceUsageConsumer` | project | start builds and check their status |
   | kit-publisher | `iam.serviceAccountUser` | kit-builder | builds can only run as kit-builder |
   | kit-builder | `logging.logWriter` | project | build logs (`CLOUD_LOGGING_ONLY`) |
+  | kit-builder | `storage.objectViewer`, IAM condition `cache/…` | bucket | read the download cache (no list) |
   | GitHub principal set (this repo id) | `iam.workloadIdentityUser` | kit-publisher | — |
 
   Together with the uploader's `ifGenerationMatch=0` precondition, **a published version can never be
@@ -127,8 +128,40 @@ What happens:
 * **medium/large:** the `build` job is skipped and the `publish` job runs `gcloud builds submit --no-source --config cloudbuild.yaml`.
   * Cloud Build clones this repo at exactly the workflow's commit and verifies the hash.
   * It builds on an E2_HIGHCPU_8 machine with a 600 GB disk and uploads the same way, as `kit-builder`.
-  * The workflow polls until the build finishes.
+  * The workflow polls until the build finishes (up to 350 minutes; a failed status query is retried, not fatal).
   * Images are pinned by digest. There are no Cloud Build GitHub triggers.
+  * Steps: `checkout` → `cache-pull` → `fetch` → `cache-push` ∥ `build` → `upload` (see the top of `cloudbuild.yaml`).
+    `cache-pull` also runs the upload tooling once, so a broken upload step fails in the first minute rather
+    than after the build.
+
+### Download cache (medium/large)
+
+Big downloads are kept in the kit bucket so each file comes from upstream once:
+
+```
+gs://BUCKET/cache/sha256/<sha256>                     a pinned download (model, ZIM, binary), named by its hash
+gs://BUCKET/cache/pmtiles/<key>-australia.pmtiles     the map extract (+ .sha256 next to it)
+```
+
+* `build_kit.py --cache-plan` lists the files of the tier (≥ 32 MB). `tools/gcs_cache.sh pull` copies the
+  ones already cached; `fetch` downloads the rest; `tools/gcs_cache.sh push` uploads new ones.
+* **The cache is a faster source, not a trusted one.** Every pinned file is checked against the manifest's
+  sha256 before use, wherever it came from; a mismatching cached copy is set aside (`*.bad`) and downloaded
+  again from upstream. A map extract (which cannot be pinned) must match its `.sha256`.
+* Only Cloud Build writes the cache, as `kit-builder`, create-only: only files `build_kit.py` verified are
+  pushed, with `--if-generation-match=0`, and the account cannot replace or delete objects. Pull requests
+  run only `lint` (no credentials). `kit-builder` may read `cache/` only (IAM condition); listing is not granted.
+* After this change, re-run `scripts/setup-gcp.sh` once to add the `cache/` read grant. Without it every
+  pull is a miss and the build downloads from upstream as before.
+* A cache push failure is a warning, never a failed build. To drop a bad or old cache object, delete it as
+  project owner (`gcloud storage rm gs://BUCKET/cache/sha256/<sha256>`). Storage for a full large-tier
+  cache is roughly 190 GB.
+* Downloads not in the cache use `aria2c` (16 connections). ZIMs from `download.kiwix.org` are also fetched
+  from the HTTPS mirrors listed in Kiwix's official metalink (`<url>.meta4`), and only if its size and
+  sha-256 match the pin. If aria2c fails or the bytes don't match, the build falls back to one HTTPS stream
+  from the manifest URL. No BitTorrent: seeding from Cloud Build would be paid egress.
+* Every item logs its source (GCS cache, aria2c + number of mirrors, single stream, map extract), size,
+  time and MB/s, and each build step ends with a summary table.
 
 Each publish writes:
 

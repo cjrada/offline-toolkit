@@ -6,6 +6,17 @@
 # --no-source: nothing is uploaded from the runner. The build clones the public repo at exactly _COMMIT
 # and checks the hash. Images are pinned by digest. Everything downloaded is checked by build_kit.py
 # --frozen. Shell variables are written $$VAR so Cloud Build does not substitute them.
+#
+# Steps (each logs per-item source, size, time and MB/s):
+#   checkout    clone _COMMIT, validate substitutions
+#   cache-pull  check the upload tooling works (fails in minute 1, not after a 5-hour build), then copy the
+#               big pinned files this tier needs from gs://_BUCKET/cache/ (tools/gcs_cache.sh)
+#   fetch       download whatever the cache lacked: aria2c, several connections, Kiwix ZIMs also from the
+#               HTTPS mirrors in Kiwix's metalink; one plain HTTPS stream as the fallback. Every file is
+#               checked against its pinned sha256, cached or not.
+#   cache-push  (runs alongside build) share the newly downloaded, verified files, create-only
+#   build       assemble the kit from the local cache and zip it
+#   upload      publish_gcs.py, run with the cloud-sdk image's own Python (it has no python3 on PATH)
 substitutions:
   _TIER: medium
   _VERSION: ""
@@ -15,7 +26,7 @@ substitutions:
 serviceAccount: projects/$PROJECT_ID/serviceAccounts/kit-builder@$PROJECT_ID.iam.gserviceaccount.com
 options:
   machineType: E2_HIGHCPU_8
-  diskSizeGb: 600          # large tier: ~171 GB kit + ~171 GB zip, plus headroom
+  diskSizeGb: 600          # large tier: ~171 GB cache (the kit hard-links it) + ~171 GB zip, plus headroom
   logging: CLOUD_LOGGING_ONLY
 timeout: 43200s
 steps:
@@ -34,23 +45,56 @@ steps:
         git fetch -q --depth 1 '${_REPO}' "$$COMMIT"
         git -c advice.detachedHead=false checkout -q FETCH_HEAD
         test "$$(git rev-parse HEAD)" = "$$COMMIT"
+        mkdir -p /workspace/cache
         df -h /workspace
-  - id: build
+  - id: cache-pull
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
+    entrypoint: bash
+    dir: src
+    args:
+      - -ceu
+      - |
+        # Preflight for the upload step: same image, same interpreter, same script.
+        sh tools/cloudsdk_python.sh -c 'import sys; print("upload python:", sys.executable, sys.version.split()[0])'
+        sh tools/cloudsdk_python.sh tools/publish_gcs.py --help >/dev/null
+        gcloud auth print-access-token >/dev/null && echo "upload credentials: ok"
+        sh tools/cloudsdk_python.sh tools/build_kit.py --tier '${_TIER}' --frozen --cache-plan /workspace/cache-plan.txt
+        bash tools/gcs_cache.sh pull /workspace/cache-plan.txt '${_BUCKET}' /workspace/cache
+  - id: fetch
     name: mirror.gcr.io/library/golang@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437  # 1.25-bookworm
     entrypoint: bash
     dir: src
     args:
       - -ceu
       - |
-        apt-get update -qq && apt-get install -y -qq python3 python3-venv poppler-utils >/dev/null
+        apt-get update -qq && apt-get install -y -qq python3 aria2 >/dev/null
+        aria2c --version | head -n 1
+        python3 tools/build_kit.py --tier '${_TIER}' --frozen --cache /workspace/cache --fetch-only --jobs 4
+        df -h /workspace
+  - id: cache-push
+    waitFor: [fetch]
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
+    entrypoint: bash
+    dir: src
+    args: [tools/gcs_cache.sh, push, /workspace/cache-plan.txt, '${_BUCKET}', /workspace/cache]
+  - id: build
+    waitFor: [fetch]
+    name: mirror.gcr.io/library/golang@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437  # 1.25-bookworm
+    entrypoint: bash
+    dir: src
+    args:
+      - -ceu
+      - |
+        apt-get update -qq && apt-get install -y -qq python3 python3-venv poppler-utils aria2 >/dev/null
         python3 -m venv /workspace/venv
         /workspace/venv/bin/pip install -q --require-hashes --only-binary :all: -r tools/requirements-build.txt
+        # Everything is in the cache by now; anything missing would still be downloaded and verified.
         /workspace/venv/bin/python tools/build_kit.py --tier '${_TIER}' --version '${_VERSION}' --frozen \
           --out /workspace/kit --cache /workspace/cache --zip /workspace/kit.zip
-        rm -rf /workspace/cache
         ls -la /workspace
   - id: upload
+    waitFor: [build, cache-push]
     name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
-    entrypoint: python3
+    entrypoint: sh
     dir: src
-    args: [tools/publish_gcs.py, --zip, /workspace/kit.zip, --bucket, '${_BUCKET}', --auth, gcloud]
+    args: [tools/cloudsdk_python.sh, tools/publish_gcs.py, --zip, /workspace/kit.zip, --bucket, '${_BUCKET}', --auth, gcloud]

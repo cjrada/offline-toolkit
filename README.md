@@ -128,6 +128,8 @@ tools/build_index.py         rebuild the manuals index (needs python3 + pdftotex
 tools/pick-model.sh / .ps1   automatic model choice used by start.sh / start.bat
 tools/build_kit.py           builds the whole kit from tools/kit-manifest.json (hash-pinned downloads)
 tools/publish_gcs.py         uploads a built kit zip to Google Cloud Storage (create-only; used by CI and Cloud Build)
+tools/gcs_cache.sh           Cloud Build's shared download cache in the kit bucket (hash-checked, create-only)
+tools/cloudsdk_python.sh     runs publish_gcs.py with the cloud-sdk image's own Python
 scripts/setup-gcp.sh         one-time, re-runnable GCP setup (bucket, Workload Identity Federation, service accounts)
 cloudbuild.yaml              medium/large kit builds on Cloud Build (submitted by the publish-kit workflow)
 tools/download-extras.sh     commented download list for one-off Medium/Large additions

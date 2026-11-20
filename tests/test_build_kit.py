@@ -89,6 +89,23 @@ class BuildKit(unittest.TestCase):
             self.assertEqual(a.namelist(), b.namelist())
             self.assertEqual([i.date_time for i in a.infolist()], [i.date_time for i in b.infolist()])
 
+    def test_fetch_only_then_build_parallel(self):
+        m = self.manifest(self.items())
+        r = run(BUILD, "--manifest", m, "--cache", os.path.join(self.t, "cache"), "--fetch-only", "--jobs", "4", "--frozen")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("cache filled", r.stderr)
+        r = self.build(m, os.path.join(self.t, "kit"), "--jobs", "4", "--frozen")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("downloads and assembly took", r.stderr)
+
+    def test_parallel_failure_stops_build(self):
+        items = self.items()
+        items[3]["sha256"] = "0" * 64
+        r = self.build(self.manifest(items), os.path.join(self.t, "kit"), "--jobs", "4")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("sha256 mismatch", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_tier_and_replaces(self):
         items = self.items()
         items[4]["replaces"] = ["model"]
@@ -228,6 +245,187 @@ class RealManifest(unittest.TestCase):
         m = json.loads(open(os.path.join(ROOT, "tools", "kit-manifest.json")).read())
         nonfree = [i["id"] for i in m["items"] if i.get("redistributable") is False]
         self.assertTrue(all(i.get("optional") for i in m["items"] if i["id"] in nonfree), "non-redistributable items must be optional")
+
+
+class Downloads(unittest.TestCase):
+    """aria2c + Kiwix metalink mirrors, the single-stream fallback, hash stamps and the GCS cache plan
+    (in-process; aria2c and the network are stubbed)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import build_kit
+        self.bk = build_kit
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = os.path.join(self.tmp.name, "cache")
+        os.makedirs(self.cache)
+        self.good = b"ZIM" + b"x" * 5000
+        self.it = {"id": "zim", "tier": "medium", "kind": "file", "dest": "library/a.zim",
+                   "url": "https://download.kiwix.org/zim/other/a_2026-01.zim",
+                   "sha256": hashlib.sha256(self.good).hexdigest(), "size": len(self.good)}
+        self.saved = (build_kit.Dl.aria2c, build_kit.Dl.mirrors, build_kit.Dl.jobs, build_kit.STAMPS,
+                      build_kit.download, build_kit.OPENER, build_kit.ARIA2_MIN)
+        build_kit.STAMPS = build_kit.Stamps(self.cache)
+        build_kit.ARIA2_MIN = 0
+        self.downloads = []
+
+        def fake_download(url, dest, retries=5, tag=""):
+            self.downloads.append(url)
+            open(dest, "wb").write(self.good)
+        build_kit.download = fake_download
+
+    def tearDown(self):
+        bk = self.bk
+        (bk.Dl.aria2c, bk.Dl.mirrors, bk.Dl.jobs, bk.STAMPS, bk.download, bk.OPENER, bk.ARIA2_MIN) = self.saved
+        self.tmp.cleanup()
+
+    def stub_aria2c(self, payload, rc=0):
+        """An aria2c that records its argv and writes payload to --dir/--out."""
+        d = os.path.join(self.tmp.name, "bin")
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "payload"), "wb").write(payload)
+        exe = os.path.join(d, "aria2c")
+        with open(exe, "w") as fh:
+            fh.write(f"""#!{sys.executable}
+import sys
+a = sys.argv[1:]
+open({os.path.join(d, "argv")!r}, "w").write("\\n".join(a))
+out = a[a.index("--dir") + 1] + "/" + a[a.index("--out") + 1]
+open(out, "wb").write(open({os.path.join(d, "payload")!r}, "rb").read())
+sys.exit({rc})
+""")
+        os.chmod(exe, 0o755)
+        self.bk.Dl.aria2c = exe
+        return os.path.join(d, "argv")
+
+    def meta4(self, sha=None, size=None, extra=""):
+        sha = sha or self.it["sha256"]
+        size = self.it["size"] if size is None else size
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+ <file name="a_2026-01.zim"><size>{size}</size>
+  <hash type="sha-256">{sha}</hash>
+  <url location="de" priority="2">https://mirror-b.example/kiwix/zim/other/a_2026-01.zim</url>
+  <url location="se" priority="1">https://mirror-a.example/zim/other/a_2026-01.zim</url>
+  <url location="fr" priority="3">http://plain-http.example/zim/other/a_2026-01.zim</url>
+  <url priority="4">https://wrong-name.example/zim/other/b.zim</url>{extra}
+ </file></metalink>""".encode()
+
+    def serve_meta4(self, data):
+        seen = []
+
+        class R(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class Opener:
+            def open(self, req, timeout=None):
+                seen.append(req.full_url)
+                if isinstance(data, Exception):
+                    raise data
+                return R(data)
+        self.bk.OPENER = Opener()
+        return seen
+
+    def test_parse_meta4_https_only_by_priority(self):
+        urls = self.bk.parse_meta4(self.meta4(), self.it, "a_2026-01.zim")
+        self.assertEqual(urls, ["https://mirror-a.example/zim/other/a_2026-01.zim",
+                                "https://mirror-b.example/kiwix/zim/other/a_2026-01.zim"])
+
+    def test_parse_meta4_rejects_changed_file_and_entities(self):
+        for data in (self.meta4(sha="0" * 64), self.meta4(size=1),
+                     b'<?xml version="1.0"?><!DOCTYPE m [<!ENTITY a "x">]><metalink/>'):
+            with self.assertRaises(ValueError):
+                self.bk.parse_meta4(data, self.it, "a_2026-01.zim")
+
+    def test_aria2c_with_kiwix_mirrors(self):
+        argv = self.stub_aria2c(self.good)
+        seen = self.serve_meta4(self.meta4())
+        path = self.bk.fetch(dict(self.it), self.cache, None)
+        self.assertEqual(open(path, "rb").read(), self.good)
+        self.assertEqual(seen, [self.it["url"] + ".meta4"])
+        a = open(argv).read().split("\n")
+        self.assertEqual(a[a.index("--") + 1:], [self.it["url"], "https://mirror-a.example/zim/other/a_2026-01.zim",
+                                                  "https://mirror-b.example/kiwix/zim/other/a_2026-01.zim"])
+        self.assertIn("--follow-metalink=false", a)
+        self.assertEqual(self.downloads, [], "fell back although aria2c worked")
+
+    def test_metalink_failure_uses_manifest_url_only(self):
+        argv = self.stub_aria2c(self.good)
+        self.serve_meta4(OSError("boom"))
+        self.bk.fetch(dict(self.it), self.cache, None)
+        a = open(argv).read().split("\n")
+        self.assertEqual(a[a.index("--") + 1:], [self.it["url"]])
+
+    def test_aria2c_failure_or_bad_bytes_falls_back_to_single_stream(self):
+        self.serve_meta4(self.meta4())
+        for payload, rc in ((self.good, 3), (b"evil" * 100, 0)):
+            with self.subTest(rc=rc):
+                for f in os.listdir(self.cache):
+                    if f != ".verified":
+                        os.remove(os.path.join(self.cache, f))
+                self.downloads.clear()
+                self.stub_aria2c(payload, rc)
+                it = dict(self.it)
+                path = self.bk.fetch(it, self.cache, None)
+                self.assertEqual(open(path, "rb").read(), self.good)
+                self.assertEqual(self.downloads, [self.it["url"]], "fallback must use the manifest URL")
+                self.assertEqual(it["_dl"]["how"], "https, 1 stream")
+
+    def test_bad_cached_copy_is_downloaded_again(self):
+        self.bk.Dl.aria2c = None
+        path = os.path.join(self.cache, self.bk.cache_name(self.it))
+        open(path, "wb").write(b"poisoned cache object")
+        open(os.path.join(self.cache, ".gcs-pulled"), "w").write(os.path.basename(path) + "\n")
+        self.bk.fetch(dict(self.it), self.cache, None)
+        self.assertEqual(open(path, "rb").read(), self.good)
+        self.assertEqual(self.downloads, [self.it["url"]])
+        self.assertTrue(os.path.exists(path + ".bad"))
+
+    def test_good_cached_copy_is_used(self):
+        self.bk.Dl.aria2c = None
+        path = os.path.join(self.cache, self.bk.cache_name(self.it))
+        open(path, "wb").write(self.good)
+        open(os.path.join(self.cache, ".gcs-pulled"), "w").write(os.path.basename(path) + "\n")
+        it = dict(self.it)
+        self.bk.fetch(it, self.cache, None)
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(it["_dl"]["how"], "GCS cache")
+
+    def test_stamps_avoid_rehashing_and_expire_on_change(self):
+        p = os.path.join(self.cache, "f.bin")
+        open(p, "wb").write(self.good)
+        calls = []
+        real = self.bk.sha256_file
+        self.bk.sha256_file = lambda x: calls.append(x) or real(x)
+        try:
+            h = self.bk.STAMPS.sha(p)
+            self.assertEqual(self.bk.Stamps(self.cache).sha(p), h, "a later build step must reuse .verified")
+            link = os.path.join(self.tmp.name, "kit-link")
+            os.link(p, link)
+            self.assertEqual(self.bk.STAMPS.known(link), h, "hard links in the kit reuse the hash")
+            self.assertEqual(len(calls), 1)
+            open(p, "ab").write(b"more")
+            self.assertNotEqual(self.bk.Stamps(self.cache).sha(p), h)
+            self.assertEqual(len(calls), 2)
+        finally:
+            self.bk.sha256_file = real
+        line = open(os.path.join(self.cache, ".verified")).readline().split()
+        self.assertEqual(line[:2], [h, "f.bin"])
+
+    def test_cache_plan(self):
+        out = os.path.join(self.tmp.name, "plan.txt")
+        r = run(BUILD, "--tier", "large", "--frozen", "--cache-plan", out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [l.split() for l in open(out).read().splitlines()]
+        m = {i["id"]: i for i in json.load(open(os.path.join(ROOT, "tools", "kit-manifest.json")))["items"]}
+        maxi = m["zim-wikipedia-maxi"]
+        self.assertIn([f"cache/sha256/{maxi['sha256']}", self.bk.cache_name(maxi), maxi["sha256"]], lines)
+        self.assertNotIn(m["zim-wikipedia-mini"]["sha256"], open(out).read(), "replaced items are not cached")
+        self.assertNotIn(m["js-basemaps"]["sha256"], open(out).read(), "tiny files are not worth caching")
+        self.assertTrue(any(l[0].startswith("cache/pmtiles/") and l[2] == "-" for l in lines))
+        for obj, name, h in lines:
+            self.assertRegex(obj, r"^cache/(sha256/[0-9a-f]{64}|pmtiles/[0-9a-f]{16}-[A-Za-z0-9._-]+)$")
+            self.assertRegex(name, r"^[0-9a-f]{16}-[A-Za-z0-9._-]+$")
 
 
 class GoVersion(unittest.TestCase):

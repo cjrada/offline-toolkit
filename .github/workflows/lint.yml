@@ -20,6 +20,10 @@ jobs:
         run: python3 tests/test_setup_gcp.py
       - name: publish-kit workflow static checks (zip hand-off not decompressed)
         run: python3 tests/test_publish_workflow.py
+      - name: cloudbuild.yaml static checks (pinned images, upload python, cache steps)
+        run: python3 tests/test_cloudbuild.py
+      - name: GCS download cache and cloud-sdk python wrapper (stub gcloud)
+        run: sh tests/test_gcs_cache.sh
       - name: model auto-selection tests (sh and PowerShell)
         run: |
           sh tests/test_pick_model.sh

@@ -9,14 +9,23 @@ and Go, or a `pmtiles` binary, for the map). Examples:
   python3 tools/build_kit.py --tier medium --zip     # + dist/offline-toolkit-medium-<ver>.zip
   python3 tools/build_kit.py --lock                  # download, then write sha256/size into the manifest
   python3 tools/build_kit.py --frozen --zip          # CI: refuse anything not pinned
+  python3 tools/build_kit.py --tier medium --fetch-only --jobs 4   # only fill the download cache
 
 Security model: every download goes over HTTPS only (redirects too), lands in a cache as *.part, is hashed,
 and is only used if it matches the pinned sha256. Nothing downloaded is executed, except go-pmtiles,
 which is built from source by `go install` (verified by the Go checksum database). Archives are
 extracted member-by-member with path checks (no absolute paths, no '..', no links).
+
+Speed: big files are fetched with aria2c (several connections) when it is installed, and download.kiwix.org
+ZIMs also from the HTTPS mirrors in Kiwix's official metalink (<url>.meta4) whose size and sha-256 match
+the pin. If that fails or the bytes don't match the pin, it falls back to one plain HTTPS stream from the
+manifest URL. Several items download at once (--jobs). Each download logs its source, size, time and MB/s.
+Cloud Build also keeps a shared cache of pinned files in GCS (tools/gcs_cache.sh, --cache-plan); anything
+that comes from a cache is checked against the pin exactly like a fresh download.
 """
-import argparse, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, time
+import argparse, concurrent.futures, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, threading, time
 import urllib.error, urllib.parse, urllib.request, zipfile
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(ROOT, "tools", "kit-manifest.json")
@@ -25,6 +34,11 @@ UA = "offline-toolkit-build/1"
 # Repo files copied into every kit (paths relative to ROOT). Generated/large content comes from the manifest.
 KIT_CODE = ["start.sh", "start.bat", "stop.sh", "stop.bat", "README.md", "LICENSE", "tools", "www"]
 SKIP_CODE = {"__pycache__", ".DS_Store"}
+ARIA2_MIN = 64 * 1000 * 1000   # use aria2c for files at least this big (or of unknown size)
+MAX_MIRRORS = 8
+CACHE_PLAN_MIN = 32 * 1000 * 1000  # --cache-plan: only share files at least this big through GCS
+KIWIX_HOST = "download.kiwix.org"
+METALINK_NS = "{urn:ietf:params:xml:ns:metalink}"
 
 
 def log(*a):
@@ -118,8 +132,77 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def download(url, dest, retries=5):
-    """Download url to dest (resuming dest+'.part'). Returns nothing; caller verifies the hash."""
+class Stamps:
+    """sha256 of files already hashed, so a multi-GB file is read once per build rather than once per step.
+    Kept in memory (by device+inode, so hard links in the kit reuse it) and, for files in the cache
+    folder, in <cache>/.verified as "<sha256>  <name>  <size> <mtime_ns> <inode>". A record only counts
+    while the file's size, mtime and inode are unchanged. tools/gcs_cache.sh push reads this file to share
+    only verified downloads."""
+
+    def __init__(self, cache=None):
+        self.dir = os.path.abspath(cache) if cache else None
+        self.path = os.path.join(self.dir, ".verified") if cache else None
+        self.mem = {}
+        self.lock = threading.Lock()
+        if not self.path or not os.path.exists(self.path):
+            return
+        with open(self.path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                p = line.split()
+                if len(p) != 5 or not re.fullmatch(r"[0-9a-f]{64}", p[0]) or not re.fullmatch(r"[A-Za-z0-9._-]+", p[1]):
+                    continue
+                try:
+                    st = os.stat(os.path.join(self.dir, p[1]))
+                    if (st.st_size, st.st_mtime_ns, st.st_ino) == tuple(int(x) for x in p[2:]):
+                        self.mem[self.key(st)] = p[0]
+                except (OSError, ValueError):
+                    pass
+
+    @staticmethod
+    def key(st):
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def known(self, path):
+        return self.mem.get(self.key(os.stat(path)))
+
+    def sha(self, path):
+        st = os.stat(path)
+        h = self.mem.get(self.key(st))
+        if h:
+            return h
+        h = sha256_file(path)
+        if self.key(os.stat(path)) != self.key(st):
+            return h  # changed while we read it: don't remember
+        with self.lock:
+            self.mem[self.key(st)] = h
+            if self.path and os.path.dirname(os.path.abspath(path)) == self.dir:
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(f"{h}  {os.path.basename(path)}  {st.st_size} {st.st_mtime_ns} {st.st_ino}\n")
+        return h
+
+
+STAMPS = Stamps()
+PROCS = set()  # running aria2c processes, killed if another download fails
+
+
+class Dl:
+    """Download settings (set from the command line in main)."""
+    aria2c = shutil.which("aria2c")
+    mirrors = True
+    jobs = 1
+
+
+def fmt_dur(sec):
+    sec = int(round(sec))
+    return f"{sec // 3600}h{sec // 60 % 60:02d}m{sec % 60:02d}s" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def rate(nbytes, sec):
+    return f"{nbytes / 1e6:,.0f} MB in {fmt_dur(sec)} ({nbytes / 1e6 / max(sec, 0.001):,.1f} MB/s)"
+
+
+def download(url, dest, retries=5, tag=""):
+    """Download url to dest in one HTTPS stream (resuming dest+'.part'). The caller verifies the hash."""
     part = dest + ".part"
     for attempt in range(1, retries + 1):
         have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -133,13 +216,14 @@ def download(url, dest, retries=5):
                 cl = r.headers.get("Content-Length")
                 total = (int(cl) + have) if cl else None
                 with open(part, "ab" if have else "wb") as fh:
-                    done, last = have, time.time()
+                    done, last, mark = have, time.time(), have
                     for b in iter(lambda: r.read(1 << 20), b""):
                         fh.write(b)
                         done += len(b)
-                        if time.time() - last > 15:
-                            last = time.time()
-                            log(f"    {done / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else ""))
+                        if time.time() - last > 30:
+                            speed = (done - mark) / 1e6 / (time.time() - last)
+                            last, mark = time.time(), done
+                            log(f"    {tag} {done / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else "") + f" ({speed:,.1f} MB/s)")
             os.replace(part, dest)
             return
         except urllib.error.HTTPError as e:
@@ -147,11 +231,128 @@ def download(url, dest, retries=5):
                 os.remove(part)
             elif e.code in (404, 410, 401, 403):
                 die(f"download failed ({e.code}) for {url}")
-            log(f"    attempt {attempt}: HTTP {e.code}")
+            log(f"    {tag} attempt {attempt}: HTTP {e.code}")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            log(f"    attempt {attempt}: {e}")
+            log(f"    {tag} attempt {attempt}: {e}")
         time.sleep(min(60, 2 ** attempt))
     die(f"giving up on {url}")
+
+
+def parse_meta4(data, it, fname):
+    """HTTPS mirror URLs for fname from a Kiwix metalink (RFC 5854), best priority first. Returns [] if the
+    metalink's size or sha-256 disagrees with the pin, so a changed upstream file is never mirrored."""
+    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+        raise ValueError("metalink has a DOCTYPE/ENTITY")
+    files = [f for f in ET.fromstring(data).iter(METALINK_NS + "file") if f.get("name") == fname]
+    if len(files) != 1:
+        raise ValueError(f"metalink has {len(files)} entries for {fname}")
+    f = files[0]
+    size = (f.findtext(METALINK_NS + "size") or "").strip()
+    if size and it.get("size") and size != str(it["size"]):
+        raise ValueError(f"metalink size {size} != pinned {it['size']}")
+    for h in f.findall(METALINK_NS + "hash"):
+        if h.get("type") == "sha-256" and it.get("sha256") and (h.text or "").strip().lower() != it["sha256"]:
+            raise ValueError("metalink sha-256 differs from the pin")
+    urls = []
+    for u in f.findall(METALINK_NS + "url"):
+        url = (u.text or "").strip()
+        p = urllib.parse.urlparse(url)
+        if p.scheme != "https" or not p.hostname or os.path.basename(p.path) != fname or len(url) > 1000 \
+                or re.search(r"[\s\x00-\x1f]", url):
+            continue
+        try:
+            prio = int(u.get("priority") or 999999)
+        except ValueError:
+            prio = 999999
+        urls.append((prio, len(urls), url))
+    return [u for _, _, u in sorted(urls)]
+
+
+def mirror_urls(it, url):
+    """The manifest URL, plus HTTPS mirrors from Kiwix's official metalink for download.kiwix.org files."""
+    p = urllib.parse.urlparse(url)
+    if not Dl.mirrors or p.hostname != KIWIX_HOST:
+        return [url]
+    try:
+        with OPENER.open(urllib.request.Request(url + ".meta4", headers={"User-Agent": UA}), timeout=30) as r:
+            data = r.read(2 << 20)
+        found = parse_meta4(data, it, os.path.basename(p.path))
+    except Exception as e:  # any problem: just use the manifest URL
+        log(f"  [{it['id']}] no mirrors ({type(e).__name__}: {e})")
+        return [url]
+    urls = [url] + [u for u in dict.fromkeys(found) if u != url]
+    return urls[:MAX_MIRRORS]
+
+
+def aria2c(urls, path, tag):
+    """Fetch one file from all urls (the same file on several servers) with many connections.
+    Returns True on success; the caller still checks the sha256."""
+    tmp = path + ".dl"
+    cmd = [Dl.aria2c, "--dir", os.path.dirname(path), "--out", os.path.basename(tmp),
+           "--continue=true", "--auto-file-renaming=false", "--allow-overwrite=true", "--file-allocation=none",
+           "--split=16", "--max-connection-per-server=8", "--min-split-size=32M", "--uri-selector=adaptive",
+           "--max-tries=8", "--retry-wait=10", "--connect-timeout=30", "--timeout=120",
+           "--follow-metalink=false", "--follow-torrent=false", "--remote-time=false",
+           "--summary-interval=60", "--console-log-level=warn", "--download-result=hide",
+           "--show-console-readout=false", "--user-agent=" + UA, "--", *urls]
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        log(f"  [{tag}] aria2c failed to start: {e}")
+        return False
+    PROCS.add(p)
+    try:
+        rc = p.wait()
+    finally:
+        PROCS.discard(p)
+    if rc == 0 and os.path.isfile(tmp):
+        os.replace(tmp, path)
+        return True
+    log(f"  [{tag}] aria2c exited with {rc}")
+    for f in (tmp, tmp + ".aria2"):
+        if os.path.exists(f):
+            os.remove(f)
+    return False
+
+
+def obtain(it, url, path):
+    """Download url to path: aria2c (with mirrors) if available, else / on failure one HTTPS stream."""
+    tag, pin = it["id"], it.get("sha256")
+    t0, how = time.time(), None
+    if Dl.aria2c and (it.get("size") or ARIA2_MIN) >= ARIA2_MIN:
+        urls = mirror_urls(it, url)
+        log(f"  [{tag}] downloading with aria2c from {len(urls)} source(s): " + ", ".join(urllib.parse.urlparse(u).hostname for u in urls))
+        if aria2c(urls, path, tag):
+            if pin and STAMPS.sha(path) != pin:
+                log(f"  [{tag}] aria2c result does not match the pinned sha256; discarding it")
+                os.replace(path, path + ".bad")
+            else:
+                how = f"aria2c, {len(urls)} source(s)"
+        if not how:
+            log(f"  [{tag}] falling back to a single HTTPS stream from {url}")
+    if not how:
+        log(f"  [{tag}] downloading {url}")
+        download(url, path, tag=f"[{tag}]")
+        how = "https, 1 stream"
+    sec, n = time.time() - t0, os.path.getsize(path)
+    it.setdefault("_dl", {"how": how, "bytes": n, "seconds": round(sec, 1)})
+    log(f"  [{tag}] downloaded {rate(n, sec)} via {how}")
+
+
+def cache_name(it):
+    url = it["url"]
+    key = it.get("sha256") or hashlib.sha256(url.encode()).hexdigest()
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(urllib.parse.urlparse(url).path) or it["id"])[-80:]
+    return f"{key[:16]}-{name}"
+
+
+def gcs_pulled(cache):
+    """Names tools/gcs_cache.sh pull fetched from the shared GCS cache (for the logs only)."""
+    try:
+        with open(os.path.join(cache, ".gcs-pulled"), encoding="utf-8") as fh:
+            return {line.strip() for line in fh}
+    except OSError:
+        return set()
 
 
 def fetch(it, cache, lock):
@@ -161,18 +362,78 @@ def fetch(it, cache, lock):
         src = urllib.request.url2pathname(urllib.parse.urlparse(url).path)
         path = src
     else:
-        key = it["sha256"] or hashlib.sha256(url.encode()).hexdigest()
-        name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(urllib.parse.urlparse(url).path) or it["id"])[-80:]
-        path = os.path.join(cache, f"{key[:16]}-{name}")
+        path = os.path.join(cache, cache_name(it))
+        if os.path.exists(path):
+            how = "GCS cache" if os.path.basename(path) in gcs_pulled(cache) else "local cache"
+            if it.get("sha256") and STAMPS.sha(path) != it["sha256"]:
+                log(f"  [{it['id']}] {how} copy does not match the pinned sha256; moved aside, downloading again")
+                os.replace(path, path + ".bad")
+            else:
+                it.setdefault("_dl", {"how": how, "bytes": os.path.getsize(path), "seconds": 0})
         if not os.path.exists(path):
-            log(f"  downloading {url}")
-            download(url, path)
+            obtain(it, url, path)
     return verify(it, path, cache, lock)
+
+
+def prefetch(items, cache, lock):
+    """Download every plain download item, Dl.jobs at a time. Any failure stops the build."""
+    todo = [it for it in items if it["kind"] in ("file", "tar", "zip")]
+    if Dl.jobs <= 1 or len(todo) <= 1:
+        for it in todo:
+            fetch(it, cache, lock)
+        return
+    log(f"downloading {len(todo)} item(s), {Dl.jobs} at a time")
+    ex = concurrent.futures.ThreadPoolExecutor(Dl.jobs)
+    futs = {ex.submit(fetch, it, cache, lock): it for it in todo}
+    for f in concurrent.futures.as_completed(futs):
+        try:
+            f.result()
+        except BaseException as e:  # die() raises SystemExit in the worker
+            if not isinstance(e, SystemExit):
+                log(f"ERROR: {futs[f]['id']}: {type(e).__name__}: {e}")
+            for p in list(PROCS):
+                p.terminate()
+            sys.stderr.flush()
+            os._exit(1)  # don't wait hours for the other downloads to finish
+    ex.shutdown()
+
+
+def summary(items):
+    rows = [(it["id"], it["_dl"]) for it in items if it.get("_dl")]
+    if not rows:
+        return
+    log("download summary (source, size, time, speed):")
+    tot_b = tot_s = 0
+    for iid, d in rows:
+        s = f"{d['bytes'] / 1e6:>10,.0f} MB"
+        if d["seconds"]:
+            s += f"  {fmt_dur(d['seconds']):>10}  {d['bytes'] / 1e6 / max(d['seconds'], 0.001):8,.1f} MB/s"
+            tot_b += d["bytes"]; tot_s += d["seconds"]
+        log(f"  {iid:<24} {d['how']:<22} {s}")
+    if tot_s:
+        log(f"  downloaded {tot_b / 1e9:,.1f} GB, {fmt_dur(tot_s)} summed over items")
+
+
+def cache_plan(items, path):
+    """Write the objects tools/gcs_cache.sh may share for these items: "<object> <cache file> <sha256|->".
+    Pinned downloads are stored under cache/sha256/<sha256>; map extracts (unpinnable) under
+    cache/pmtiles/<cache file>, with their hash in a .sha256 object next to them."""
+    lines = []
+    for it in items:
+        if it["kind"] in ("file", "tar", "zip") and it.get("sha256") and (it.get("size") or 0) >= CACHE_PLAN_MIN \
+                and urllib.parse.urlparse(it["url"]).scheme == "https":
+            lines.append(f"cache/sha256/{it['sha256']} {cache_name(it)} {it['sha256']}")
+        elif it["kind"] == "pmtiles":
+            name = map_cache_name(it)
+            lines.append(f"cache/pmtiles/{name} {name} -")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("".join(x + "\n" for x in lines))
+    log(f"wrote {len(lines)} cache entr{'y' if len(lines) == 1 else 'ies'} to {path}")
 
 
 def verify(it, path, cache, lock):
     url = it.get("url") or f"{it.get('source')}:{it.get('entry')}"
-    got = sha256_file(path)
+    got = STAMPS.sha(path)
     size = os.path.getsize(path)
     if it.get("sha256"):
         if got != it["sha256"]:
@@ -353,19 +614,34 @@ def pmtiles_tool(m, cache, given):
     return exe
 
 
-def build_map(it, m, out, cache, tool):
-    dst = os.path.join(out, it["dest"])
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
+def map_cache_name(it):
     key = hashlib.sha256(f"{it['url']}|{it['bbox']}|{it['maxzoom']}".encode()).hexdigest()[:16]
-    cached = os.path.join(cache, f"{key}-{os.path.basename(dst)}")
-    if not os.path.exists(cached):
+    return f"{key}-{os.path.basename(it['dest'])}"
+
+
+def map_cached(it, m, cache, tool):
+    cached = os.path.join(cache, map_cache_name(it))
+    if os.path.exists(cached):
+        how = "GCS cache" if os.path.basename(cached) in gcs_pulled(cache) else "local cache"
+        it.setdefault("_dl", {"how": how, "bytes": os.path.getsize(cached), "seconds": 0})
+    else:
         exe = pmtiles_tool(m, cache, tool)
         log(f"  extracting map {it['bbox']} z0-{it['maxzoom']} from {it['url']} (~GBs, takes a while)")
+        t0 = time.time()
         subprocess.run([exe, "extract", it["url"], cached + ".part", f"--bbox={it['bbox']}",
                         f"--maxzoom={it['maxzoom']}", "--download-threads=8"], check=True)
         os.replace(cached + ".part", cached)
-    it["_sha256"], it["_size"] = sha256_file(cached), os.path.getsize(cached)
-    place(cached, dst)
+        sec, n = time.time() - t0, os.path.getsize(cached)
+        it.setdefault("_dl", {"how": "go-pmtiles extract", "bytes": n, "seconds": round(sec, 1)})
+        log(f"  [{it['id']}] extracted {rate(n, sec)}")
+    it["_sha256"], it["_size"] = STAMPS.sha(cached), os.path.getsize(cached)
+    return cached
+
+
+def build_map(it, m, out, cache, tool):
+    dst = os.path.join(out, it["dest"])
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    place(map_cached(it, m, cache, tool), dst)
 
 
 def copy_code(out):
@@ -436,7 +712,8 @@ def write_info(out, tier, items, version, rev, dirty):
 
 
 def write_sums(out):
-    lines = [f"{sha256_file(p)}  {rel}" for rel, p in walk(out) if rel != "SHA256SUMS"]
+    # Files hard-linked from the cache were hashed when they were verified; only hash the rest.
+    lines = [f"{STAMPS.known(p) or sha256_file(p)}  {rel}" for rel, p in walk(out) if rel != "SHA256SUMS"]
     with open(os.path.join(out, "SHA256SUMS"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
     log(f"wrote SHA256SUMS ({len(lines)} files)")
@@ -500,7 +777,15 @@ def main(argv=None):
     ap.add_argument("--pmtiles", help="path to an existing pmtiles/go-pmtiles binary")
     ap.add_argument("--version", help="kit version label (default <yyyymmdd>-<commit>); [0-9A-Za-z._-]+")
     ap.add_argument("--no-index", action="store_true", help="skip rebuilding www/docs/index.js")
+    ap.add_argument("--jobs", type=int, default=3, metavar="N", help="download N items at once (default 3)")
+    ap.add_argument("--no-aria2c", action="store_true", help="never use aria2c, even if it is installed")
+    ap.add_argument("--no-mirrors", action="store_true", help="only use the manifest URL (no Kiwix metalink mirrors)")
+    ap.add_argument("--fetch-only", action="store_true", help="only fill the cache (downloads and map extract); build no kit")
+    ap.add_argument("--cache-plan", metavar="FILE", help="write the GCS cache plan for the selected items (no downloads) and exit")
     a = ap.parse_args(argv)
+    Dl.jobs = max(1, min(a.jobs, 16))
+    Dl.aria2c = None if a.no_aria2c else shutil.which("aria2c")
+    Dl.mirrors = not a.no_mirrors
 
     if a.version is not None and not re.fullmatch(r"[0-9A-Za-z._-]{1,64}", a.version):
         die(f"--version must match [0-9A-Za-z._-]+, got {a.version!r}")
@@ -525,10 +810,28 @@ def main(argv=None):
         return 1 if (a.frozen and unpinned) else 0
     if a.frozen and unpinned:
         die("--frozen: these items have no sha256 yet: " + ", ".join(unpinned) + "\n  run `python3 tools/build_kit.py --lock` and commit the manifest")
+    if a.cache_plan:
+        cache_plan(items, a.cache_plan)
+        return 0
 
     dist = os.path.join(ROOT, "dist")
     cache = os.path.abspath(a.cache or os.path.join(dist, "cache"))
     os.makedirs(cache, exist_ok=True)
+    global STAMPS
+    STAMPS = Stamps(cache)
+    log(f"downloader: {'aria2c ' + Dl.aria2c if Dl.aria2c else 'python (single stream)'}, {Dl.jobs} job(s), "
+        f"Kiwix mirrors {'on' if Dl.mirrors and Dl.aria2c else 'off'}")
+
+    if a.fetch_only:
+        t0 = time.time()
+        prefetch(items, cache, None)
+        for it in items:
+            if it["kind"] == "pmtiles":
+                log(f"[{it['id']}]")
+                map_cached(it, m, cache, a.pmtiles)
+        summary(items)
+        log(f"cache filled in {fmt_dur(time.time() - t0)}")
+        return 0
 
     if a.lock:
         lock = {}
@@ -548,6 +851,8 @@ def main(argv=None):
         die("--out inside the repository must be under dist/")
     os.makedirs(out, exist_ok=True)
     log(f"building {a.tier} kit in {out}")
+    t0 = time.time()
+    prefetch(items, cache, None)
     copy_code(out)
     for it in items:
         log(f"[{it['id']}]")
@@ -565,6 +870,8 @@ def main(argv=None):
             place(path, os.path.join(out, it["dest"]), it.get("mode"))
         else:
             extract(it, path, out)
+    summary(items)
+    log(f"downloads and assembly took {fmt_dur(time.time() - t0)}")
     if not a.no_index:
         build_index(out)
 
