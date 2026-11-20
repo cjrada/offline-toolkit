@@ -129,10 +129,18 @@ What happens:
   * Cloud Build clones this repo at exactly the workflow's commit and verifies the hash.
   * It builds on an E2_HIGHCPU_8 machine with a 600 GB disk and uploads the same way, as `kit-builder`.
   * The workflow polls until the build finishes (up to 350 minutes; a failed status query is retried, not fatal).
+    **A cold large build (empty cache) can take longer: `wikipedia_en_all_maxi` alone is ~127 GB. Then the
+    publish run turns red after 350 minutes while Cloud Build keeps going (up to 12 h) and still uploads
+    if it succeeds; that is expected.** Check the result with `gcloud builds describe <id> --project <project>`
+    (the id is in the publish log) or `gcloud storage cat gs://BUCKET/kits/large/latest.json`.
   * Images are pinned by digest. There are no Cloud Build GitHub triggers.
-  * Steps: `checkout` → `cache-pull` → `fetch` → `cache-push` ∥ `build` → `upload` (see the top of `cloudbuild.yaml`).
-    `cache-pull` also runs the upload tooling once, so a broken upload step fails in the first minute rather
-    than after the build.
+  * Steps: `checkout` → `cache-pull` → `fetch` → `cache-push` ∥ `build` → `gate` → `upload` (see the top of
+    `cloudbuild.yaml`). `cache-pull` also runs the upload tooling once, so a broken upload step fails in the
+    first minute rather than after the build.
+  * Cloud Build cancels all running steps as soon as one fails, so `fetch` and `build` record their exit
+    code instead of failing. `cache-push` then always finishes sharing what was already downloaded and
+    verified, even after a failed fetch or build, and `gate` fails the build before `upload`, so a
+    partial kit is never published.
 
 ### Download cache (medium/large)
 
@@ -156,10 +164,16 @@ gs://BUCKET/cache/pmtiles/<key>-australia.pmtiles     the map extract (+ .sha256
 * A cache push failure is a warning, never a failed build. To drop a bad or old cache object, delete it as
   project owner (`gcloud storage rm gs://BUCKET/cache/sha256/<sha256>`). Storage for a full large-tier
   cache is roughly 190 GB.
-* Downloads not in the cache use `aria2c` (16 connections). ZIMs from `download.kiwix.org` are also fetched
-  from the HTTPS mirrors listed in Kiwix's official metalink (`<url>.meta4`), and only if its size and
-  sha-256 match the pin. If aria2c fails or the bytes don't match, the build falls back to one HTTPS stream
-  from the manifest URL. No BitTorrent: seeding from Cloud Build would be paid egress.
+* Downloads not in the cache use `aria2c` (16 connections). ZIMs from `download.kiwix.org` come from the
+  HTTPS mirrors listed in Kiwix's official metalink (`<url>.meta4`), used only if its size and sha-256
+  match the pin. If aria2c fails or the bytes don't match, the build falls back to one HTTPS stream from
+  the manifest URL. No BitTorrent: seeding from Cloud Build would be paid egress.
+* **On the aria2c path, integrity comes from the sha256 pin, not from HTTPS alone.** aria2c can't refuse a
+  redirect to plain `http://`. So it only gets direct `https://` URLs: the metalink mirrors, or the end of
+  the manifest URL's redirect chain, resolved first with the HTTPS-only opener. It never gets
+  `download.kiwix.org` itself, which redirects. A redirect target that turns out to be `http://` means no
+  aria2c for that file. If a server still redirected aria2c somewhere else, the pin check rejects any
+  changed byte and the HTTPS-only single stream takes over.
 * Every item logs its source (GCS cache, aria2c + number of mirrors, single stream, map extract), size,
   time and MB/s, and each build step ends with a summary table.
 

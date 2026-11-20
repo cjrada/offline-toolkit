@@ -319,10 +319,15 @@ sys.exit({rc})
 
         class Opener:
             def open(self, req, timeout=None):
-                seen.append(req.full_url)
+                seen.append((req.get_method(), req.full_url))
+                if req.get_method() == "HEAD":  # redirect lookup: pretend download.kiwix.org sends us to a mirror
+                    r = R(b"")
+                    r.geturl = lambda: redirect
+                    return r
                 if isinstance(data, Exception):
                     raise data
                 return R(data)
+        redirect = getattr(self, "redirect", "https://redirected.example/zim/other/a_2026-01.zim")
         self.bk.OPENER = Opener()
         return seen
 
@@ -342,19 +347,31 @@ sys.exit({rc})
         seen = self.serve_meta4(self.meta4())
         path = self.bk.fetch(dict(self.it), self.cache, None)
         self.assertEqual(open(path, "rb").read(), self.good)
-        self.assertEqual(seen, [self.it["url"] + ".meta4"])
+        self.assertEqual(seen, [("GET", self.it["url"] + ".meta4")])
         a = open(argv).read().split("\n")
-        self.assertEqual(a[a.index("--") + 1:], [self.it["url"], "https://mirror-a.example/zim/other/a_2026-01.zim",
+        # only the direct mirrors: the download.kiwix.org URL redirects, and aria2c can't refuse http redirects
+        self.assertEqual(a[a.index("--") + 1:], ["https://mirror-a.example/zim/other/a_2026-01.zim",
                                                   "https://mirror-b.example/kiwix/zim/other/a_2026-01.zim"])
         self.assertIn("--follow-metalink=false", a)
         self.assertEqual(self.downloads, [], "fell back although aria2c worked")
 
-    def test_metalink_failure_uses_manifest_url_only(self):
+    def test_metalink_failure_uses_resolved_redirect_target(self):
         argv = self.stub_aria2c(self.good)
-        self.serve_meta4(OSError("boom"))
+        seen = self.serve_meta4(OSError("boom"))
         self.bk.fetch(dict(self.it), self.cache, None)
         a = open(argv).read().split("\n")
-        self.assertEqual(a[a.index("--") + 1:], [self.it["url"]])
+        self.assertEqual(a[a.index("--") + 1:], ["https://redirected.example/zim/other/a_2026-01.zim"])
+        self.assertIn(("HEAD", self.it["url"]), seen)
+
+    def test_http_redirect_target_skips_aria2c(self):
+        argv = self.stub_aria2c(self.good)
+        self.redirect = "http://plain.example/a_2026-01.zim"
+        self.serve_meta4(OSError("boom"))
+        it = dict(self.it)
+        self.bk.fetch(it, self.cache, None)
+        self.assertFalse(os.path.exists(argv), "aria2c must not get a URL that redirects to http")
+        self.assertEqual(self.downloads, [self.it["url"]])
+        self.assertEqual(it["_dl"]["how"], "https, 1 stream")
 
     def test_aria2c_failure_or_bad_bytes_falls_back_to_single_stream(self):
         self.serve_meta4(self.meta4())

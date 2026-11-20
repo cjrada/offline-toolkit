@@ -11,8 +11,11 @@ and Go, or a `pmtiles` binary, for the map). Examples:
   python3 tools/build_kit.py --frozen --zip          # CI: refuse anything not pinned
   python3 tools/build_kit.py --tier medium --fetch-only --jobs 4   # only fill the download cache
 
-Security model: every download goes over HTTPS only (redirects too), lands in a cache as *.part, is hashed,
-and is only used if it matches the pinned sha256. Nothing downloaded is executed, except go-pmtiles,
+Security model: every download lands in a cache, is hashed, and is only used if it matches the pinned
+sha256; the pin is what guarantees integrity. The Python downloader (and every metalink / redirect lookup)
+is HTTPS-only, redirects included. aria2c cannot refuse a redirect, so it is only given direct https://
+URLs (Kiwix metalink mirrors, or a redirect target already resolved over HTTPS); if a server still
+redirected it elsewhere, the pin check catches any changed byte and the HTTPS-only fallback runs. Nothing downloaded is executed, except go-pmtiles,
 which is built from source by `go install` (verified by the Go checksum database). Archives are
 extracted member-by-member with path checks (no absolute paths, no '..', no links).
 
@@ -268,20 +271,38 @@ def parse_meta4(data, it, fname):
     return [u for _, _, u in sorted(urls)]
 
 
-def mirror_urls(it, url):
-    """The manifest URL, plus HTTPS mirrors from Kiwix's official metalink for download.kiwix.org files."""
+def https_target(url):
+    """Follow url's redirects with the HTTPS-only opener (HEAD) and return where it ends up."""
+    with OPENER.open(urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA}), timeout=30) as r:
+        final = r.geturl()
+    if urllib.parse.urlparse(final).scheme != "https":
+        raise urllib.error.URLError(f"redirected to non-https {final}")
+    return final
+
+
+def aria2_sources(it, url):
+    """Direct HTTPS URLs to hand aria2c, or [] to skip it. aria2c can't refuse a redirect to plain http, so
+    it never gets a URL that redirects: for download.kiwix.org files the HTTPS mirrors from Kiwix's
+    official metalink (size and sha-256 must match the pin), otherwise the end of url's redirect chain,
+    resolved with the HTTPS-only opener. A signed redirect target that expires mid-download just makes
+    aria2c fail, and the single-stream fallback (from the manifest URL, HTTPS-only) takes over."""
     p = urllib.parse.urlparse(url)
-    if not Dl.mirrors or p.hostname != KIWIX_HOST:
-        return [url]
+    if Dl.mirrors and p.hostname == KIWIX_HOST:
+        try:
+            with OPENER.open(urllib.request.Request(url + ".meta4", headers={"User-Agent": UA}), timeout=30) as r:
+                data = r.read(2 << 20)
+            found = [u for u in dict.fromkeys(parse_meta4(data, it, os.path.basename(p.path)))
+                     if urllib.parse.urlparse(u).hostname != KIWIX_HOST]  # that one redirects
+            if found:
+                return found[:MAX_MIRRORS]
+            log(f"  [{it['id']}] metalink lists no HTTPS mirrors")
+        except Exception as e:  # any problem: fall through to the redirect target
+            log(f"  [{it['id']}] no mirrors ({type(e).__name__}: {e})")
     try:
-        with OPENER.open(urllib.request.Request(url + ".meta4", headers={"User-Agent": UA}), timeout=30) as r:
-            data = r.read(2 << 20)
-        found = parse_meta4(data, it, os.path.basename(p.path))
-    except Exception as e:  # any problem: just use the manifest URL
-        log(f"  [{it['id']}] no mirrors ({type(e).__name__}: {e})")
-        return [url]
-    urls = [url] + [u for u in dict.fromkeys(found) if u != url]
-    return urls[:MAX_MIRRORS]
+        return [https_target(url)]
+    except Exception as e:
+        log(f"  [{it['id']}] could not resolve {url} over HTTPS ({type(e).__name__}: {e}); not using aria2c")
+        return []
 
 
 def aria2c(urls, path, tag):
@@ -320,9 +341,10 @@ def obtain(it, url, path):
     tag, pin = it["id"], it.get("sha256")
     t0, how = time.time(), None
     if Dl.aria2c and (it.get("size") or ARIA2_MIN) >= ARIA2_MIN:
-        urls = mirror_urls(it, url)
-        log(f"  [{tag}] downloading with aria2c from {len(urls)} source(s): " + ", ".join(urllib.parse.urlparse(u).hostname for u in urls))
-        if aria2c(urls, path, tag):
+        urls = aria2_sources(it, url)
+        if urls:
+            log(f"  [{tag}] downloading with aria2c from {len(urls)} source(s): " + ", ".join(urllib.parse.urlparse(u).hostname for u in urls))
+        if urls and aria2c(urls, path, tag):
             if pin and STAMPS.sha(path) != pin:
                 log(f"  [{tag}] aria2c result does not match the pinned sha256; discarding it")
                 os.replace(path, path + ".bad")

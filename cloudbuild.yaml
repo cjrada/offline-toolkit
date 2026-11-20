@@ -16,7 +16,13 @@
 #               checked against its pinned sha256, cached or not.
 #   cache-push  (runs alongside build) share the newly downloaded, verified files, create-only
 #   build       assemble the kit from the local cache and zip it
+#   gate        fail the build here if fetch or build failed
 #   upload      publish_gcs.py, run with the cloud-sdk image's own Python (it has no python3 on PATH)
+# Cloud Build cancels every running step as soon as one step fails. So fetch and build don't fail their
+# step: they write their exit code to /workspace/<step>.rc and exit 0, which lets cache-push finish sharing
+# whatever was already downloaded and verified (also after a failed fetch or build). The gate step then
+# fails the build if either code is not 0, before upload can run, so a partial kit.zip is never published.
+# (The overall 12 h timeout still stops everything at once.)
 substitutions:
   _TIER: medium
   _VERSION: ""
@@ -67,10 +73,12 @@ steps:
     args:
       - -ceu
       - |
-        apt-get update -qq && apt-get install -y -qq python3 aria2 >/dev/null
-        aria2c --version | head -n 1
-        python3 tools/build_kit.py --tier '${_TIER}' --frozen --cache /workspace/cache --fetch-only --jobs 4
+        rc=0
+        { apt-get update -qq && apt-get install -y -qq python3 aria2 >/dev/null && aria2c --version | head -n 1 &&
+          python3 tools/build_kit.py --tier '${_TIER}' --frozen --cache /workspace/cache --fetch-only --jobs 4; } || rc=$$?
+        echo "$$rc" > /workspace/fetch.rc
         df -h /workspace
+        [ "$$rc" = 0 ] || echo "fetch FAILED (exit $$rc); cache-push still shares what was verified, gate fails the build"
   - id: cache-push
     waitFor: [fetch]
     name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
@@ -85,15 +93,30 @@ steps:
     args:
       - -ceu
       - |
-        apt-get update -qq && apt-get install -y -qq python3 python3-venv poppler-utils aria2 >/dev/null
-        python3 -m venv /workspace/venv
-        /workspace/venv/bin/pip install -q --require-hashes --only-binary :all: -r tools/requirements-build.txt
+        if [ "$$(cat /workspace/fetch.rc)" != 0 ]; then echo "fetch failed: not building"; echo 1 > /workspace/build.rc; exit 0; fi
+        rc=0
         # Everything is in the cache by now; anything missing would still be downloaded and verified.
-        /workspace/venv/bin/python tools/build_kit.py --tier '${_TIER}' --version '${_VERSION}' --frozen \
-          --out /workspace/kit --cache /workspace/cache --zip /workspace/kit.zip
+        { apt-get update -qq && apt-get install -y -qq python3 python3-venv poppler-utils aria2 >/dev/null &&
+          python3 -m venv /workspace/venv &&
+          /workspace/venv/bin/pip install -q --require-hashes --only-binary :all: -r tools/requirements-build.txt &&
+          /workspace/venv/bin/python tools/build_kit.py --tier '${_TIER}' --version '${_VERSION}' --frozen \
+            --out /workspace/kit --cache /workspace/cache --zip /workspace/kit.zip; } || rc=$$?
+        echo "$$rc" > /workspace/build.rc
         ls -la /workspace
-  - id: upload
+        [ "$$rc" = 0 ] || echo "build FAILED (exit $$rc); gate fails the build after cache-push finishes"
+  - id: gate
     waitFor: [build, cache-push]
+    name: gcr.io/cloud-builders/git@sha256:a9f5868e2e7ea196ddd36dd822e3e612fcde84d0728cc35e10039d4ed24a8b6c
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        f=$$(cat /workspace/fetch.rc 2>/dev/null || echo missing); b=$$(cat /workspace/build.rc 2>/dev/null || echo missing)
+        echo "fetch exit $$f, build exit $$b"
+        [ "$$f" = 0 ] && [ "$$b" = 0 ] || { echo "fetch or build failed (see their logs); not uploading"; exit 1; }
+        test -s /workspace/kit.zip
+  - id: upload
+    waitFor: [gate]
     name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
     entrypoint: sh
     dir: src

@@ -6,7 +6,9 @@
   medium build made a 41.5 GB kit and then lost it at upload). It runs publish_gcs.py through
   tools/cloudsdk_python.sh, and the cache-pull step runs the same wrapper and script with the same image
   first, so a broken upload fails in minute one.
-* Step order: cache-pull before fetch; cache-push and build both wait for fetch; upload waits for both.
+* Step order: cache-pull before fetch; cache-push and build both wait for fetch; gate waits for both and
+  upload for gate. fetch and build record their exit code instead of failing (Cloud Build would cancel a
+  running cache-push), and gate fails the build on a recorded failure, so upload never sees a partial kit.
 * GCS cache writes (gcs_cache.sh push) appear only in cloudbuild.yaml, never in a GitHub workflow, and
   the PR workflow (lint.yml) can get no OIDC token and has no pull_request_target trigger.
 """
@@ -37,7 +39,7 @@ def check(text):
     problems = []
     st = steps(text)
     order = list(st)
-    want = ["checkout", "cache-pull", "fetch", "cache-push", "build", "upload"]
+    want = ["checkout", "cache-pull", "fetch", "cache-push", "build", "gate", "upload"]
     if order != want:
         return [f"steps must be {want}, got {order}"]
     for sid, c in st.items():
@@ -59,13 +61,24 @@ def check(text):
         problems.append("cache-push must run tools/gcs_cache.sh push")
     if "waitFor" in st["fetch"] or "waitFor" in st["cache-pull"]:
         problems.append("fetch and cache-pull must run in order (no waitFor)")
-    for sid, need in (("cache-push", {"fetch"}), ("build", {"fetch"}), ("upload", {"build", "cache-push"})):
+    for sid, need in (("cache-push", {"fetch"}), ("build", {"fetch"}), ("gate", {"build", "cache-push"}), ("upload", {"gate"})):
         w = set(re.findall(r"[\w-]+", field(st[sid], "waitFor") or ""))
         if w != need:
             problems.append(f"{sid}: waitFor must be {sorted(need)}, got {sorted(w)}")
     for sid in ("fetch", "build"):
         if "--frozen" not in st[sid]:
             problems.append(f"{sid}: build_kit.py must run with --frozen")
+        # Cloud Build cancels running steps when one fails, so these record their code instead of failing...
+        if f'echo "$$rc" > /workspace/{sid}.rc' not in st[sid] or "|| rc=$$?" not in st[sid]:
+            problems.append(f"{sid}: must record its exit code in /workspace/{sid}.rc (so cache-push is not cancelled)")
+    # ...and the gate turns a recorded failure into a failed build before upload.
+    for rc in ("fetch.rc", "build.rc"):
+        if f"/workspace/{rc}" not in st["gate"]:
+            problems.append(f"gate: must check /workspace/{rc}")
+    if "exit 1" not in st["gate"]:
+        problems.append("gate: must fail the build when fetch or build failed")
+    if "allowFailure" in text or "allow_failure" in text:
+        problems.append("no allowFailure: upload must never run after a failed build")
     return problems
 
 
@@ -90,8 +103,10 @@ def self_test(text):
     assert check(text) == [], check(text)
     bad = re.sub(r"(?m)^(  - id: upload\n(?:    .*\n)*?)    entrypoint: sh\n", r"\1    entrypoint: python3\n", text)
     assert bad != text and any("entrypoint python3" in p for p in check(bad)), "python3 entrypoint not caught"
-    bad = text.replace("waitFor: [build, cache-push]", "waitFor: [build]")
+    bad = text.replace("waitFor: [gate]", "waitFor: [build]")
     assert any("upload: waitFor" in p for p in check(bad)), "upload waitFor not checked"
+    bad = text.replace('echo "$$rc" > /workspace/build.rc', 'echo "$$rc"')
+    assert any("build.rc" in p for p in check(bad)), "build rc recording not checked"
     bad = re.sub(r"golang@sha256:[0-9a-f]{64}", "golang:1.25-bookworm", text, count=1)
     assert any("not pinned by digest" in p for p in check(bad)), "tag-pinned image not caught"
 
