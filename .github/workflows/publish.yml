@@ -150,7 +150,7 @@ jobs:
       (needs.build.result == 'success' ||
        (needs.build.result == 'skipped' && github.event_name == 'workflow_dispatch' && inputs.tier != 'small'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 360  # GitHub's maximum; the medium/large step below gives up waiting at 350 minutes
     environment: gcs-publish
     permissions:
       contents: read
@@ -285,12 +285,20 @@ jobs:
           id=$(gcloud builds submit --project "$project" --no-source --config cloudbuild.yaml --async --format='value(id)' \
                  --substitutions "_TIER=$TIER,_VERSION=$VERSION,_COMMIT=$COMMIT,_BUCKET=$GCS_BUCKET")
           echo "Cloud Build $id started"
+          # The build keeps going if this job stops; a failed status query (e.g. a transient API error after
+          # hours) must not fail the job, so only a final status ends the loop.
+          deadline=$(( $(date +%s) + 350 * 60 )); last=""
           while :; do
-            status=$(gcloud builds describe "$id" --project "$project" --format='value(status)')
+            status=$(gcloud builds describe "$id" --project "$project" --format='value(status)' 2>/dev/null) || status=UNKNOWN
+            [ "$status" = "$last" ] || { echo "$(date -u +%H:%M:%S) Cloud Build $id: $status"; last=$status; }
             case "$status" in
               SUCCESS) echo "Cloud Build $id succeeded"; break ;;
               FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) echo "::error::Cloud Build $id ended with $status"; exit 1 ;;
             esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::stopped waiting after 350 minutes; Cloud Build $id is still running on its own. Check it with: gcloud builds describe $id --project $project"
+              exit 1
+            fi
             sleep 60
           done
 
