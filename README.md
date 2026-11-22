@@ -33,7 +33,7 @@ compare it with the first word of the `.sha256` file.
 | What | Tool | Port |
 |---|---|---|
 | Home page, Ask-the-Manuals, Maps, PDF shelf | `miniserve` (static web server) | 8000 |
-| AI chat (general assistant) + API used by Ask-the-Manuals | `llamafile` 0.10.6 (llama.cpp) | 8080 |
+| AI chat (general assistant) + API used by Ask-the-Manuals | `llamafile` 0.10.6 (llama.cpp); on a Windows GPU, llama.cpp's own `llama-server` (Vulkan, b12626) | 8080 |
 | Offline library (wiki / guides) | `kiwix-serve` 3.8.x | 8081 |
 
 ## Start / stop
@@ -71,14 +71,28 @@ compare it with the first word of the `.sha256` file.
   model was picked automatically, it is picked again for the new mode (RAM vs GPU memory); a model you chose
   is kept. It uses the same 127.0.0.1:8079 switch service and per-run token as *Use* (the request carries a
   third line, `cpu=on` or `cpu=off`, validated as strictly as the model path), so it is laptop-only too.
+* **Windows GPU engine: llama.cpp's `llama-server` (Vulkan).** `start.bat` runs GPU starts on
+  `bin\llama-vulkan\llama-server.exe` (llama.cpp b12626) when `GPU` is unset or `vulkan`. Its newer ggml has
+  no long-prompt crash on Turing cards (below), reads prompts about twice as fast as llamafile 0.10.6 and
+  answers slightly faster (RTX 2070 Max-Q, Qwen3 8B: ~1,100 vs ~550 tok/s prompt, 32-36 vs 22-31 tok/s
+  answers). Flash attention is `auto` there (`FA=` still overrides) - it switches itself off where the GPU
+  lacks support. CPU starts, the CPU fallback and llamafile-only `GPU=` values (`nvidia`, `amd`, ...) still use
+  llamafile; `set ENGINE=llamafile` uses llamafile on the GPU too. If llama-server exits or hangs, the
+  launcher tries **llamafile on the GPU** next, and only then the CPU. Linux (`start.sh`) still uses llamafile.
 * **GPU workarounds (llamafile 0.10.6, Vulkan).** Every llamafile start gets `DISABLE_VULKAN_OBS_CAPTURE=1`
   and `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS Studio's Vulkan hook crashes it), and GPU starts pass
-  `-fa off` (Vulkan flash attention can segfault). See *Troubleshooting*.
+  `-fa off` (Vulkan flash attention can segfault). On NVIDIA compute capability 7.5 (Turing: RTX 20xx,
+  GTX 16xx), `start.bat` also sets `GGML_VK_DISABLE_COOPMAT2=1` for llamafile (long prompts crash it
+  otherwise). See *Troubleshooting*.
+* **One copy at a time.** `start.bat` refuses to start while the kit or its AI is already running (Windows
+  lets a second AI server listen on port 8080 next to the first, without an error). Run `stop.bat` first.
 * **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU, or is still not answering
   `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change) while a GPU is in use, the
   launcher restarts it once with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
-  *"GPU start failed (...) - fell back to the CPU"* line. On Windows, `start.bat` starts llamafile with `start`
-  and cannot see its exit code, so it watches `tasklist` and polls `/health` with `curl.exe`. The home page
+  *"GPU start failed (...) - fell back to the CPU"* line. On Windows, `start.bat` starts the AI with `start`,
+  so it watches `tasklist` and polls `/health` with `curl.exe`; the AI runs through `tools\run-ai.bat`, which
+  writes its output and exit code to `%TEMP%\offline-kit-ai.log`, and the launcher prints why it stopped
+  (exit code, SIGSEGV, out of GPU memory, last log line) and keeps the log as `offline-kit-ai.crash.log`. The home page
   says the GPU start failed; later model switches stay on the CPU until you untick *Use CPU only* (or restart).
   Linux keeps the GPU attempt's log as `llamafile-gpu.log`. If CPU mode exits too, the launcher reports it
   and does not loop. No automatic fallback when you pinned a backend yourself (`GPU=vulkan` etc.).
@@ -95,8 +109,10 @@ compare it with the first word of the `.sha256` file.
 * **Chat / `localhost:8080` refused, or "AI: starting / not running" on the home page.** llamafile is still
   loading (10-60 s, longer from a slow USB stick) or has exited. Read the launcher window: it says when the
   AI is ready, and whether it fell back to the CPU. Logs on Linux: `$TMPDIR/offline-toolkit-logs/llamafile.log`
-  (`llamafile-gpu.log` for a failed GPU attempt). On Windows, run `bin\llamafile.exe` by hand with the
-  arguments the launcher printed to see the error.
+  (`llamafile-gpu.log` for a failed GPU attempt). On Windows: `%TEMP%\offline-kit-ai.log` (the current AI)
+  and `%TEMP%\offline-kit-ai.crash.log` (the last one that stopped, with its exit code).
+* **"The Offline Kit (or its AI) is already running".** It is - open <http://localhost:8000/>, or run
+  `stop.bat` and then `start.bat` to restart it.
 * **OBS Studio installed (Windows).** OBS registers an implicit Vulkan layer (`VK_LAYER_OBS_HOOK`,
   `C:\ProgramData\obs-studio-hook\obs-vulkan64.json`) that crashes llamafile 0.10.6's Vulkan init with
   0xC0000005, even at `-ngl 1`. The launchers set `DISABLE_VULKAN_OBS_CAPTURE=1` and
@@ -104,10 +120,18 @@ compare it with the first word of the `.sha256` file.
   llamafile yourself, set either one first.
 * **Vulkan flash attention can segfault** on some NVIDIA cards/drivers (seen on an RTX 2070 Max-Q, driver
   551.61): with higher `-ngl` / context (qwen3-4b at `-c 8192` and 35+ GPU layers) llamafile exits with
-  code 11 right after "Flash Attention enabled". It is not out of memory. The kit passes `-fa off` on the GPU;
-  `FA=on` turns it back on.
-* **NVIDIA on Windows uses Vulkan.** This llamafile build has no CUDA backend, so `GPU=nvidia` is fatal;
-  leave `GPU` unset (auto) or use `GPU=vulkan`.
+  code 11 right after "Flash Attention enabled". It is not out of memory. The kit passes `-fa off` to llamafile
+  on the GPU; `FA=on` turns it back on.
+* **Long prompts crash llamafile on Turing GPUs** (RTX 2070 Max-Q, driver 621.14): short chats work, but a
+  ~2,000-token prompt (Ask-the-Manuals, pasted logs) ends with "Terminating on uncaught SIGSEGV" as the prompt
+  is processed - really an uncaught C++ exception (0xE06D7363) from the Vulkan `NV_cooperative_matrix2`
+  (coopmat2) path. `-np 1`, `-ub`, `-ngl` and `-c` only move the crash point. llama-server (the Windows GPU
+  engine) does not have it. For llamafile, `start.bat` sets `GGML_VK_DISABLE_COOPMAT2=1` on compute capability
+  7.5; prompt reading is slower (~230-610 tok/s), answers are not. Set `GGML_VK_DISABLE_COOPMAT2=0` to keep
+  coopmat2, or `=1` to force it off on other cards (ggml only checks that the variable exists; the launcher
+  clears it for `0`).
+* **NVIDIA on Windows uses Vulkan.** Neither engine in the kit has a CUDA backend, so `GPU=nvidia` is fatal;
+  leave `GPU` unset (auto) or use `GPU=vulkan`. An installed CUDA toolkit makes no difference.
 * **If the GPU still fails,** the launcher falls back to the CPU by itself (above). To skip the GPU entirely,
   tick *Use CPU only* on the home page, or start with `GPU=disable` (Windows: `set GPU=disable`).
 
@@ -118,6 +142,7 @@ start.sh / start.bat / stop.sh / stop.bat
 bin/llamafile.exe            llamafile 0.10.6 - ONE Actually Portable Executable for Windows + Linux (+ macOS), x86-64 & ARM64
 bin/linux/                   kiwix-serve 3.8.2, miniserve 0.35.0 (static Linux x86-64)
 bin/windows/                 kiwix-serve.exe 3.8.1 (+ ICU DLLs), miniserve.exe 0.35.0 (Windows x86-64)
+bin/llama-vulkan/            llama.cpp b12626 llama-server.exe + DLLs (Vulkan, Windows x86-64, ~89 MB) - the Windows GPU engine
 models/                      qwen3-4b-instruct-2507-q4_k_m.gguf (2.5 GB) + qwen3-1.7b-q4_k_m.gguf (1.1 GB, for 4 GB laptops), Apache-2.0
 library/                     Kiwix ZIMs: WikiMed mini (166 MB), zimgit Water, Medicine, Knots (~115 MB), Wikivoyage nopic, Outdoors SE
                              (saved without the date in the name, e.g. wikipedia_en_medicine_mini.zim; KIT-INFO.json records the dated source)
@@ -223,6 +248,14 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   as the sh picker under PowerShell 7. Windows-only probes (CIM, registry, `nvidia-smi.exe`) were not run on Windows.
 * GPU workarounds, Windows (RTX 2070 Max-Q, 32 GB RAM, driver 551.61, llamafile 0.10.6 Vulkan; tested on
   that laptop, not by CI): with the OBS env vars and `-fa off` the server reached 32 tok/s on the GPU.
+* Long-prompt crash and the llama-server engine, Windows (same RTX 2070 Max-Q, driver 621.14, medium kit;
+  tested on that laptop, not by CI), with a 2,462- and a 7,587-token prompt: llamafile crashed on both at
+  every `-np`/`-ub`/`-ngl`/`-c` setting that kept the whole context, and survived with
+  `GGML_VK_DISABLE_COOPMAT2=1` (4 runs each). llama-server b12626 Vulkan survived both with coopmat2 on
+  (6 runs). The real `start.bat` was run from Explorer: GPU start on llama-server (all layers on the GPU),
+  long prompts, model switches (4B, 8B, Gemma vision with its projector), *Use CPU only* on/off, a second
+  start refused, llama-server killed -> llamafile on the GPU, llamafile killed -> CPU, exit codes logged.
+  `tools/pick-model.ps1` read `compute_cap` 7.5 from the real `nvidia-smi`.
 * CPU fallback and *Use CPU only* (`tests/test_cpu_fallback.sh`, stub llamafile/miniserve, Linux): GPU exit
   and GPU hang (no `/health`) both restart once on the CPU with the model re-picked for RAM and one
   "fell back" line; with no GPU detected, a slow or hanging load is left running and an exit is only
@@ -240,7 +273,8 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   * US federal manuals (FM 21-76, FM 4-25.11, USMC, FEMA/Ready.gov): public domain.
   * Wikipedia / WikiMed / Wikivoyage / Wikibooks ZIMs: CC BY-SA (attribution travels with the ZIM). StackExchange ZIMs: CC BY-SA.
   * Map data: (c) OpenStreetMap contributors, ODbL; Protomaps basemap; MapLibre (BSD-3), pdf.js (Apache-2.0), Noto fonts (OFL).
-  * llamafile (Apache-2.0), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
+  * llamafile (Apache-2.0), llama.cpp (MIT; `bin/llama-vulkan/LICENSE-llama.cpp`, plus LLVM OpenMP's
+    licence for `libomp.dll`), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
   * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
   * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`build_kit.py --with post-disaster`), marks the kit `"redistributable": false`, and `publish_gcs.py` refuses to upload such a kit.
 * `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.

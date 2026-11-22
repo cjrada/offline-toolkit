@@ -8,7 +8,8 @@
 # fallback in REASON and models.json. $env:LLM_RUN (start counter) is copied into models.json.
 # Also prints LOAD_TIMEOUT: $env:HEALTH_TIMEOUT, else 60 s + 1 s per 50 MB of model, and GPU_MB: the GPU
 # memory seen for this pick (0 = no GPU, or GPU=disable); start.bat only falls back to the CPU after a
-# GPU attempt, i.e. when GPU_MB > 0.
+# GPU attempt, i.e. when GPU_MB > 0. GPU_CC lists NVIDIA compute capabilities (start.bat turns off Vulkan
+# coopmat2 on 7.5 / Turing, where it crashes on long prompts).
 #   -Json FILE         also write the home page's www\models.json
 #   -RequestFile FILE  read a model-switch request (from the 127.0.0.1 control server): line 1 must equal
 #                      $env:SWITCH_TOKEN, line 2 must name an existing model under models\, optional line 3
@@ -48,6 +49,7 @@ if ($RequestFile) {
 }
 
 $vramMB = 0
+$ccs = @()
 if ($env:GPU -eq 'disable') { $vramMB = 0 }
 elseif ($env:VRAM_MB) { $vramMB = [int64]$env:VRAM_MB }
 else {
@@ -55,6 +57,12 @@ else {
     $smi = Get-Command nvidia-smi -ErrorAction Stop
     foreach ($l in (& $smi.Source --query-gpu=memory.total --format=csv,noheader,nounits)) {
       $v = [int64]($l -replace '[^0-9]', ''); if ($v -gt $vramMB) { $vramMB = $v } }
+  } catch {}
+  # NVIDIA compute capability (e.g. 7.5 = Turing / RTX 20xx), queried separately: older nvidia-smi
+  # builds lack compute_cap, and that must not cost the VRAM reading above.
+  try {
+    foreach ($l in (& $smi.Source --query-gpu=compute_cap --format=csv,noheader 2>$null)) {
+      if ("$l".Trim() -match '^[0-9]+\.[0-9]+$') { $ccs += @("$l".Trim()) } }
   } catch {}
   if ($vramMB -eq 0) {
     # qwMemorySize is a 64-bit value (AdapterRAM is capped at 4 GB); covers AMD and NVIDIA.
@@ -126,3 +134,5 @@ if ($Json) {
 $loadTimeout = if ($env:HEALTH_TIMEOUT -match '^[0-9]+$') { [int64]$env:HEALTH_TIMEOUT } else { 60 + [int64][math]::Floor((SizeMB (Get-Item -LiteralPath $model)) / 50) }
 "LOAD_TIMEOUT=$loadTimeout"
 "GPU_MB=$vramMB"
+# GPU_CC: NVIDIA compute capabilities seen (space-separated, empty = none / not NVIDIA / GPU=disable).
+"GPU_CC=" + (($ccs | Select-Object -Unique) -join ' ')
