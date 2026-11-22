@@ -61,4 +61,25 @@ expect "HEALTH_TIMEOUT override" "$(HEALTH_TIMEOUT=30 run 3900 12288)" 'LOAD_TIM
 expect "GPU_MB with a GPU"       "$(run 3900 12288)" 'GPU_MB=12288'
 expect "GPU_MB with no GPU"      "$(run 3900 0)"     'GPU_MB=0'
 expect "GPU_MB with GPU=disable" "$(env -u MODEL -u CTX GPU=disable RAM_MB=3900 VRAM_MB=12288 pwsh -NoProfile -File tools/pick-model.ps1 2>/dev/null | tr '\r\n' '  ')" 'GPU_MB=0'
+# GPU_CC: NVIDIA compute capabilities from nvidia-smi (start.bat turns Vulkan coopmat2 off on 7.5 / Turing).
+# A fake nvidia-smi (sh for Linux, .cmd for Windows) reports two GPUs; FAKE_SMI_OLD=1 mimics an nvidia-smi
+# without the compute_cap field, which must not cost the VRAM reading.
+mkdir -p "$T/fakebin"
+cat > "$T/fakebin/nvidia-smi" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *memory.total*) echo 8192 ;;
+  *compute_cap*) if [ "$FAKE_SMI_OLD" = 1 ]; then echo 'Field "compute_cap" is not a valid field to query.'; exit 2; fi
+                 printf '7.5\n8.6\n' ;;
+esac
+EOF
+chmod +x "$T/fakebin/nvidia-smi"
+printf '@echo off\r\nset "A=%%*"\r\nif not "%%A:memory.total=%%"=="%%A%%" (echo 8192& exit /b 0)\r\nif "%%FAKE_SMI_OLD%%"=="1" (echo Field "compute_cap" is not a valid field to query.& exit /b 2)\r\necho 7.5\r\necho 8.6\r\n' > "$T/fakebin/nvidia-smi.cmd"
+smi(){ env -u MODEL -u CTX -u GPU -u VRAM_MB RAM_MB=15800 PATH="$T/fakebin:$PATH" "$@" pwsh -NoProfile -File tools/pick-model.ps1 2>/dev/null | tr '\r\n' '  '; }
+out=$(smi); expect "nvidia-smi VRAM" "$out" 'GPU_MB=8192'; expect "GPU_CC lists each GPU" "$out" 'GPU_CC=7.5 8.6'
+out=$(smi FAKE_SMI_OLD=1); expect "old nvidia-smi: VRAM still read" "$out" 'GPU_MB=8192'; expect "old nvidia-smi: GPU_CC empty" "$out" 'GPU_CC= '
+expect "GPU_CC empty with GPU=disable" "$(smi GPU=disable)" 'GPU_CC= '
+# start.bat's engine fallback (llama-server failed -> llamafile on the GPU) re-picks with ENGINE_FALLBACK=1
+expect "engine fallback in REASON" "$(smi ENGINE_FALLBACK=1)" 'REASON=llama-server failed, llamafile on the GPU;'
+expect "CPU fallback wins over engine fallback" "$(smi ENGINE_FALLBACK=1 GPU_FALLBACK=1 GPU=disable)" 'REASON=GPU mode failed, running on the CPU;'
 exit $fail

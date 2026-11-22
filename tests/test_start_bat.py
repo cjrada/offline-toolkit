@@ -17,6 +17,10 @@ step with it:
   when GPU was set by hand.
 * Switch requests (model + optional cpu=on|off) are validated by pick-model.ps1 -CheckOnly; the
   toggle restarts with GPU=disable or the user's own GPU value.
+* GPU engine: llama.cpp's Vulkan llama-server (bin\\llama-vulkan) when present and a GPU was detected
+  (GPU_MB > 0) or GPU=vulkan; no-GPU machines keep llamafile. If it exits or hangs, llamafile on the GPU, then the CPU. Both run through tools\\run-ai.bat,
+  which logs the exit code. A second start is refused. Vulkan coopmat2 is turned off on Turing
+  (GPU_CC 7.5) for llamafile only, unless the user set GGML_VK_DISABLE_COOPMAT2.
 """
 import re
 import sys
@@ -62,11 +66,13 @@ check("FA defaults to off for GPU runs", first(r"^if not defined FA_GPU set FA_G
 check("FA validated (on/off/auto)", first(r'FA must be on, off or auto') >= 0)
 check("GPU starts pass -fa %FA_GPU%", re.search(r'set "GPUARG=-fa %FA_GPU%"', body) is not None)
 check("CPU starts pass --gpu disable", re.search(r'set "GPUARG=--gpu disable"', body) is not None)
-check("llamafile command line carries %GPUARG%", re.search(r'start "Offline Kit - AI" .*bin\\llamafile\.exe .*%GPUARG%', body) is not None)
+check("llamafile command line carries %GPUARG%", re.search(r'start "Offline Kit - AI" .*bin\\llamafile\.exe"? .*%GPUARG%', body) is not None)
 check("no -fit workaround left", "-fit" not in body.lower())
 
-check("exit watch uses tasklist for llamafile.exe",
-      re.search(r'tasklist /fi "imagename eq llamafile\.exe".*goto llm_exited', body, re.I) is not None)
+check("exit watch uses tasklist for the running engine (%LLM_EXE%)",
+      re.search(r'tasklist /fi "imagename eq %LLM_EXE%".*goto llm_exited', body, re.I) is not None)
+check("LLM_EXE names llamafile.exe or llama-server.exe per start",
+      body.count("set LLM_EXE=llamafile.exe") >= 2 and "set LLM_EXE=llama-server.exe" in body)
 check("health poll with curl.exe on /health", re.search(r'curl\.exe -sf -m 2 -o nul "%HEALTH_URL%"', body) is not None)
 check("health URL defaults to 127.0.0.1:8080/health",
       first(r"^if not defined HEALTH_URL set HEALTH_URL=http://127\.0\.0\.1:8080/health$") >= 0)
@@ -95,5 +101,80 @@ check("invalid request ignored", "if not defined REQ_MODEL (echo Ignored an inva
 check("cpu=on -> GPU=disable", re.search(r'if /i "%REQ_CPU%"=="on" \(\r\n(?:.*\r\n)*?\s+set GPU=disable\r\n', body) is not None)
 check("cpu=off -> the user's GPU value (or auto)", re.search(r'if /i "%REQ_CPU%"=="off" \(\r\n(?:.*\r\n)*?\s+set "GPU=%USER_GPU%"', body) is not None)
 check("control server still 127.0.0.1 only", re.search(r'miniserve\.exe "%CTL%" -i 127\.0\.0\.1 -p 8079', body) is not None)
+
+def L(name):
+    """Index of the label line :name (not a goto/call to it)."""
+    return text.index("\r\n:" + name + "\r\n")
+
+
+# --- GPU engine: llama.cpp's Vulkan llama-server, llamafile as GPU fallback, then the CPU ---
+seg = text[L("start_llm"):L("started_llm")]
+check("llama-server only with ENGINE=auto, no engine fallback yet, and the build present",
+      'if /i "%ENGINE%"=="auto" if not defined ENGINE_FALLBACK if exist "bin\\llama-vulkan\\llama-server.exe" (' in seg)
+check("llama-server with GPU unset only when a GPU was detected (GPU_MB not empty, not 0)",
+      'if not defined GPU if not "%GPU_MB%"=="" if not "%GPU_MB%"=="0" set USE_SRV=1' in seg)
+check("...or with GPU=vulkan set by hand (llamafile-only --gpu values keep llamafile)",
+      'if /i "%GPU%"=="vulkan" set USE_SRV=1' in seg)
+check("no other way to set USE_SRV=1 (no-GPU machines keep llamafile)",
+      len(re.findall(r"set USE_SRV=1", seg)) == 2 and "if not defined GPU set USE_SRV=1" not in seg)
+check("ENGINE validated (auto/llamafile)", first(r"ENGINE must be auto or llamafile") >= 0)
+check("llama-server flash attention: FA if set, else auto",
+      'set "SRV_FA=%USER_FA%"' in seg and "if not defined SRV_FA set SRV_FA=auto" in seg and 'set "GPUARG=-fa %SRV_FA%"' in seg)
+check("llama-server command line carries model, host, port, context, reasoning, %GPUARG%",
+      re.search(r'bin\\llama-vulkan\\llama-server\.exe" -m "%MODEL%" %MMARG% --host %BIND% --port 8080 -c %CTX% '
+                r'--reasoning %REASONING% %GPUARG%', seg) is not None)
+check("both engines run through tools\\run-ai.bat into %AILOG%",
+      len(re.findall(r'cmd /c ""tools\\run-ai\.bat" "bin\\.*>"%AILOG%" 2>&1"', body)) == 2)
+seg = text[L("llm_exited"):L("exit_reason")]
+check("llama-server exit -> engine_fallback before the GPU/CPU checks",
+      seg.index('if /i "%LLM_EXE%"=="llama-server.exe" goto engine_fallback') < seg.index("if defined GPU goto llm_dead"))
+seg = text[L("llm_hung"):L("cpu_fallback")]
+check("hang: slow-load rules first (GPU pinned / no GPU -> left running), then llama-server -> engine_fallback",
+      seg.index("if defined GPU goto llm_slow") < seg.index('"%LLM_VRAM%"=="0" goto llm_slow') < seg.index("call :kill_llm")
+      < seg.index('if /i "%LLM_EXE%"=="llama-server.exe" goto engine_fallback') < seg.index("goto cpu_fallback"))
+seg = text[L("engine_fallback"):L("kill_llm")]
+check("engine_fallback sets ENGINE_FALLBACK=1, bumps LLM_RUN, re-picks (models.json) and restarts",
+      all(s in seg for s in ("set ENGINE_FALLBACK=1", "set /a LLM_RUN+=1", "%PICK%", "call :start_llm"))
+      and seg.index("set ENGINE_FALLBACK=1") < seg.index("%PICK%"))
+check("cpu=off toggle clears ENGINE_FALLBACK (tries llama-server again)",
+      re.search(r'if /i "%REQ_CPU%"=="off" \(\r\n(?:.*\r\n)*?\s+set ENGINE_FALLBACK=\r\n', body) is not None)
+seg = text[L("kill_llm"):]
+check("kill_llm stops both engines", "taskkill /f /im llamafile.exe" in seg and "taskkill /f /im llama-server.exe" in seg)
+check("no direct llamafile-only taskkill outside kill_llm", body.count("taskkill /f /im llamafile.exe") == 1)
+
+# --- second start refused (llama-server can share port 8080 with a running copy) ---
+title = first(r"^title Offline Kit - launcher")
+check("running launcher detected before this window takes the title",
+      0 < first(r'tasklist /fi "WINDOWTITLE eq Offline Kit - launcher\*".*goto already_running') < title)
+check("running engine detected before the title",
+      0 < first(r"for %%e in \(llamafile\.exe llama-server\.exe\) do .*goto already_running") < title)
+check("already_running explains and exits", ":already_running" in text and "run stop.bat first" in text)
+check("already_running names the engines (it also fires for an unrelated llamafile / llama-server)",
+      "an AI engine (llamafile / llama-server) is already running" in text)
+
+# --- Vulkan coopmat2: off on Turing (GPU_CC 7.5) for llamafile only; the user's value wins ---
+check("user's GGML_VK_DISABLE_COOPMAT2 captured before any start",
+      0 < first(r'^set "USER_COOPMAT2=%GGML_VK_DISABLE_COOPMAT2%"$') < first(r"^call :start_llm"))
+seg = text[L("start_llm"):L("start_srv")]
+check("llamafile path: coopmat2 off on compute capability 7.5 unless the user set it",
+      'if not defined USER_COOPMAT2 (echo  %GPU_CC% | findstr /c:" 7.5" >nul && set GGML_VK_DISABLE_COOPMAT2=1)' in seg)
+seg2 = text[L("start_srv"):L("started_llm")]
+check("llama-server path: only the user's coopmat2 value", "7.5" not in seg2 and 'set "GGML_VK_DISABLE_COOPMAT2=%USER_COOPMAT2%"' in seg2)
+check("GGML_VK_DISABLE_COOPMAT2=0 clears the variable (ggml only checks it exists)",
+      body.count('if "%GGML_VK_DISABLE_COOPMAT2%"=="0" set GGML_VK_DISABLE_COOPMAT2=') == 2)
+
+# --- exit reason kept ---
+seg = text[L("exit_reason"):L("llm_hung")]
+check("exit reason: crash log copy, last line, exit code, SIGSEGV / out of memory",
+      all(s in seg for s in ('copy /y "%AILOG%" "%TEMP%\\offline-kit-ai.crash.log"', "FAIL_LAST", "[launcher] AI process exit code",
+                             "SIGSEGV", "ErrorOutOfDeviceMemory", "exit code %FAIL_CODE%")))
+
+RUN_AI = BAT.parent / "tools" / "run-ai.bat"
+ra = RUN_AI.read_bytes() if RUN_AI.exists() else b""
+check("tools/run-ai.bat exists with CRLF endings", bool(ra) and b"\n" not in ra.replace(b"\r\n", b""))
+check("run-ai.bat runs its arguments and logs the exit code",
+      b"\r\n%*\r\n" in ra and b"echo [launcher] AI process exit code %errorlevel%" in ra)
+STOP = (BAT.parent / "stop.bat").read_bytes()
+check("stop.bat stops llama-server.exe too", b"taskkill /f /im llama-server.exe" in STOP)
 
 sys.exit(1 if fails else 0)
