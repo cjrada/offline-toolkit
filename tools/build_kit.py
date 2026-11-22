@@ -28,7 +28,7 @@ manifest URL. Several items download at once (--jobs). Each download logs its so
 Cloud Build also keeps a shared cache of pinned files in GCS (tools/gcs_cache.sh, --cache-plan); anything
 that comes from a cache is checked against the pin exactly like a fresh download.
 """
-import argparse, concurrent.futures, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, threading, time
+import argparse, concurrent.futures, fnmatch, hashlib, http.client, json, os, re, shutil, stat, subprocess, sys, tarfile, threading, time
 import urllib.error, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
@@ -80,6 +80,9 @@ def load_manifest(path):
         if it["kind"] == "pmtiles":
             if it.get("build", "manifest") not in ("manifest", "latest"):
                 die(f"{it['id']}: \"build\" must be \"manifest\" or \"latest\", got {it['build']!r}")
+            tm = it.get("tiles_major")
+            if tm is not None and (type(tm) is not int or tm < 1):
+                die(f"{it['id']}: \"tiles_major\" must be a positive integer, got {tm!r}")
             if urllib.parse.urlparse(it["url"]).scheme == "https" and not protomaps_build(it["url"]):
                 die(f"{it['id']}: map url must be https://{PROTOMAPS_HOST}/<YYYYMMDD>.pmtiles, got {it['url']!r}")
         if it["kind"] == "git" and not re.fullmatch(r"[0-9a-f]{40}", it.get("commit") or ""):
@@ -669,27 +672,45 @@ def protomaps_url(build):
 
 
 def parse_builds(data):
-    """Build dates (YYYYMMDD) listed in Protomaps' builds.json, newest first. Only the date is taken from
-    each entry ({"key": "20261121.pmtiles", ...}); the URL is always rebuilt on build.protomaps.com."""
+    """[(date, version)] for the builds listed in Protomaps' builds.json, newest first. From each entry
+    ({"key": "20261121.pmtiles", "version": "4.15.2", ...}) only the date and the tile schema version
+    (None if missing or malformed) are taken; the URL is always rebuilt on build.protomaps.com."""
     doc = json.loads(data)
     if isinstance(doc, dict):
         doc = doc.get("builds")
     if not isinstance(doc, list):
         raise ValueError("builds.json is not a list of builds")
-    dates = set()
+    found = {}
     for e in doc:
         key = e.get("key") if isinstance(e, dict) else e
         m = re.fullmatch(r"(\d{8})(?:\.pmtiles)?", key.strip()) if isinstance(key, str) else None
         if m:
-            dates.add(m.group(1))
-    if not dates:
+            ver = e.get("version") if isinstance(e, dict) else None
+            found[m.group(1)] = ver if isinstance(ver, str) and re.fullmatch(r"\d{1,4}(\.\d{1,6}){0,3}", ver) else None
+    if not found:
         raise ValueError("builds.json lists no builds")
-    return sorted(dates, reverse=True)
+    return sorted(found.items(), reverse=True)
+
+
+def tiles_major(version):
+    """4 for tile schema version '4.15.2'; None if unknown."""
+    return int(version.split(".")[0]) if version else None
 
 
 def list_builds():
     with OPENER.open(urllib.request.Request(PROTOMAPS_BUILDS, headers={"User-Agent": UA}), timeout=30) as r:
         return parse_builds(r.read(4 << 20))
+
+
+def builds_listed(it):
+    """builds.json as [(date, version)], read at most once per item per run; [] if it cannot be read."""
+    if "_builds" not in it:
+        try:
+            it["_builds"] = list_builds()
+        except Exception as e:
+            log(f"  [{it['id']}] could not read the list of Protomaps builds ({type(e).__name__}: {e})")
+            it["_builds"] = []
+    return it["_builds"]
 
 
 def probe_map(url):
@@ -700,8 +721,8 @@ def probe_map(url):
             head = r.read(7)
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code}"
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:
-        return f"{type(e).__name__}: {e}"
+    except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError, ValueError) as e:
+        return f"{type(e).__name__}: {e}"  # e.g. IncompleteRead, BadStatusLine: try the next build
     return None if head == b"PMTiles" else "not a PMTiles archive"
 
 
@@ -714,20 +735,29 @@ def map_cache_name(it, url):
 
 def map_sources(it, cache):
     """URLs of the Protomaps builds to try, in order (lazily: builds.json is only read if needed). First the
-    manifest URL, unless "build": "latest". Then from builds.json: a still-listed build whose extract is
-    already in the cache (so --fetch-only and the build after it, or a GCS cache hit, agree), then the
-    newest MAP_FALLBACKS listed builds, newest first."""
+    manifest URL, unless "build": "latest". Then the fallback candidates: the newest MAP_FALLBACKS builds in
+    builds.json whose tile schema major version is the item's "tiles_major" (a newer schema would not
+    render with the pinned @protomaps/basemaps style). Of those, one whose extract is already in the cache
+    comes first, so --fetch-only and the build after it, or a GCS cache hit, agree; extracts of any other
+    build are never used."""
     first = None if it.get("build") == "latest" else it["url"]
     if first:
         yield first
-    try:
-        builds = list_builds()
-    except Exception as e:
-        log(f"  [{it['id']}] could not read the list of Protomaps builds ({type(e).__name__}: {e})")
-        return
-    urls = [u for u in map(protomaps_url, builds) if u != first]
-    cached = [u for u in urls if cache and os.path.exists(os.path.join(cache, map_cache_name(it, u)))]
-    yield from cached[:1] + [u for u in urls if u not in cached[:1]][:MAP_FALLBACKS]
+    want, ok, skipped = it.get("tiles_major"), [], []
+    for date, ver in builds_listed(it):
+        url = protomaps_url(date)
+        if url == first:
+            continue
+        if want is not None and tiles_major(ver) != want:
+            if not ok:  # only worth saying for builds newer than the one we fall back to
+                skipped.append(f"{date} (tiles {ver or 'version unknown'})")
+            continue
+        ok.append(url)
+    if skipped:
+        log(f"  [{it['id']}] skipping Protomaps builds without v{want} tiles: " + ", ".join(skipped))
+    ok = ok[:MAP_FALLBACKS]
+    cached = [u for u in ok if cache and os.path.exists(os.path.join(cache, map_cache_name(it, u)))]
+    yield from cached[:1] + [u for u in ok if u not in cached[:1]]
 
 
 def resolve_map(it, cache=None):
@@ -742,7 +772,12 @@ def resolve_map(it, cache=None):
 def note_map(it, url):
     req = None if it.get("build") == "latest" else it["url"]
     build = protomaps_build(url)
-    it["_map"] = {"url": url, "protomaps_build": build, "requested_url": req, "fallback": url != req}
+    ver = dict(builds_listed(it)).get(build) if build else None  # the manifest's build: only for the record
+    want = it.get("tiles_major")
+    if want is not None and ver and tiles_major(ver) != want:
+        log(f"  [{it['id']}] WARNING build {build} has tile schema {ver}, but the map item expects v{want}")
+    it["_map"] = {"url": url, "protomaps_build": build, "tiles_version": ver, "requested_url": req,
+                  "fallback": req is not None and url != req}  # true only if the manifest's build was asked for and not used
     if req and url != req:
         log(f"  [{it['id']}] WARNING the manifest's Protomaps build is no longer available; used build {build} "
             f"instead. Consider updating the map url in tools/kit-manifest.json.")

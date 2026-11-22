@@ -209,7 +209,7 @@ Refresh the map: `pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles
 (go-pmtiles, ~2.2 GB download; current builds are listed in <https://build-metadata.protomaps.dev/builds.json>).
 Protomaps deletes daily builds after about a week. `tools/build_kit.py` tries the build named in
 `tools/kit-manifest.json` first; if it is gone (HTTP 404) it uses the newest build that `builds.json`
-still lists, or the next newest if that fails. It logs a warning and records the build in `KIT-INFO.json`,
+lists with the same tile schema major version (`tiles_major`), or the next newest if that fails. It logs a warning and records the build in `KIT-INFO.json`,
 so an old date in the manifest never breaks a build.
 
 ## Recommended tiers

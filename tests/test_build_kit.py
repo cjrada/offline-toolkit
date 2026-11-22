@@ -531,12 +531,15 @@ class MapBuilds(unittest.TestCase):
         os.makedirs(self.cache)
         build_kit.STAMPS = build_kit.Stamps(self.cache)
         self.it = {"id": "map", "tier": "small", "kind": "pmtiles", "url": self.u("20261115"),
-                   "bbox": "112.5,-44,154,-9.5", "maxzoom": 15, "sha256": None, "pin": "none", "dest": "www/maps/au.pmtiles"}
-        # 20261119 is listed but its file is missing; 20261115 (the manifest's) is pruned.
-        self.listed = json.dumps([{"key": f"{d}.pmtiles", "size": 1, "version": "4.x"}
-                                  for d in ("20261116", "20261121", "20261117", "20261119", "20261118")]
-                                 + [{"key": "README.txt"}, {"key": 5}, "junk"]).encode()
-        self.files = {self.BUILDS: self.listed, **{self.u(d): b"PMTiles\x03" for d in ("20261116", "20261117", "20261118", "20261121")}}
+                   "bbox": "112.5,-44,154,-9.5", "maxzoom": 15, "tiles_major": 4, "sha256": None, "pin": "none",
+                   "dest": "www/maps/au.pmtiles"}
+        # 20261119 is listed but its file is missing; 20261115 (the manifest's) is pruned; 20261122 has a
+        # new tile schema the pinned style can't render; 20230901 is an old v3 weekly build.
+        self.listed = json.dumps([{"key": f"{d}.pmtiles", "size": 1, "version": v} for d, v in (
+            ("20261116", "4.15.2"), ("20261122", "5.0.0"), ("20261121", "4.15.2"), ("20261117", "4.15.2"),
+            ("20261119", "4.15.2"), ("20261118", "4.15.1"), ("20230901", "3.7.1"))]
+            + [{"key": "README.txt"}, {"key": 5}, "junk"]).encode()
+        self.files = {self.BUILDS: self.listed, **{self.u(d): b"PMTiles\x03" for d in ("20261116", "20261117", "20261118", "20261121", "20261122", "20230901")}}
         self.tool = self.stub_pmtiles()
 
     def tearDown(self):
@@ -574,8 +577,11 @@ open(a[2], "w").write(a[1])
         return path, fake.seen
 
     def test_parse_builds_newest_first_dates_only(self):
-        self.assertEqual(self.bk.parse_builds(self.listed), ["20261121", "20261119", "20261118", "20261117", "20261116"])
-        self.assertEqual(self.bk.parse_builds(b'{"builds": ["20261120.pmtiles"]}'), ["20261120"])
+        self.assertEqual(self.bk.parse_builds(self.listed), [
+            ("20261122", "5.0.0"), ("20261121", "4.15.2"), ("20261119", "4.15.2"), ("20261118", "4.15.1"),
+            ("20261117", "4.15.2"), ("20261116", "4.15.2"), ("20230901", "3.7.1")])
+        self.assertEqual(self.bk.parse_builds(b'{"builds": ["20261120.pmtiles"]}'), [("20261120", None)])
+        self.assertEqual(self.bk.parse_builds(b'[{"key": "20261120.pmtiles", "version": "4; rm"}]'), [("20261120", None)])
         for bad in (b"[]", b'[{"key": "x.pmtiles"}]', b'{"a": 1}', b'"20261120"'):
             with self.subTest(bad), self.assertRaises(ValueError):
                 self.bk.parse_builds(bad)
@@ -590,7 +596,7 @@ open(a[2], "w").write(a[1])
                 self.assertIsNone(self.bk.protomaps_build(url))
 
     def test_manifest_rejects_other_map_hosts_and_build_values(self):
-        for change in ({"url": "https://evil.example/20261121.pmtiles"}, {"build": "20261121"}):
+        for change in ({"url": "https://evil.example/20261121.pmtiles"}, {"build": "20261121"}, {"tiles_major": "4"}, {"tiles_major": True}):
             with tempfile.TemporaryDirectory() as d, self.subTest(change):
                 p = os.path.join(d, "m.json")
                 json.dump({"tools": {}, "items": [{**self.it, **change}]}, open(p, "w"))
@@ -602,9 +608,9 @@ open(a[2], "w").write(a[1])
         self.files[self.u("20261115")] = b"PMTiles\x03"
         path, seen = self.build()
         self.assertEqual(self.extracted(), [self.u("20261115")])
-        self.assertNotIn(self.BUILDS, seen, "builds.json is only read when the manifest's build is gone")
+        self.assertEqual([u for u in seen if u.endswith(".pmtiles")], [self.u("20261115")], "no other build is tried")
         self.assertEqual(os.path.basename(path), self.bk.map_cache_name(self.it, self.u("20261115")))
-        self.assertEqual(self.it["_map"], {"url": self.u("20261115"), "protomaps_build": "20261115",
+        self.assertEqual(self.it["_map"], {"url": self.u("20261115"), "protomaps_build": "20261115", "tiles_version": None,
                                            "requested_url": self.u("20261115"), "fallback": False})
 
     def test_pruned_manifest_build_falls_back_to_newest(self):
@@ -614,6 +620,7 @@ open(a[2], "w").write(a[1])
         self.assertEqual(os.path.basename(path), self.bk.map_cache_name(self.it, self.u("20261121")))
         self.assertEqual(open(path).read(), self.u("20261121"))
         self.assertEqual(self.it["_map"]["protomaps_build"], "20261121")
+        self.assertEqual(self.it["_map"]["tiles_version"], "4.15.2")
         self.assertTrue(self.it["_map"]["fallback"])
         self.assertEqual(self.it["_map"]["requested_url"], self.u("20261115"))
         self.assertEqual(self.it["_sha256"], sha(path))
@@ -633,6 +640,36 @@ open(a[2], "w").write(a[1])
         self.assertNotIn(self.u("20261115"), seen)
         self.assertEqual(self.it["_map"]["protomaps_build"], "20261121")
         self.assertIsNone(self.it["_map"]["requested_url"])
+        self.assertFalse(self.it["_map"]["fallback"], "nothing was asked for and not used")
+
+    def test_newer_tile_schema_is_skipped(self):
+        self.build()
+        self.assertNotIn(self.u("20261122"), self.extracted())
+        self.assertEqual(self.it["_map"]["protomaps_build"], "20261121")
+        # with nothing of the expected major listed, no build is used (old v3 builds included)
+        self.it["tiles_major"] = 6
+        with self.assertRaises(SystemExit):
+            self.build()
+        self.assertEqual(self.extracted(), [self.u("20261121")])
+        # without a tiles_major guard the newest build is taken, whatever its schema
+        del self.it["tiles_major"]
+        os.remove(os.path.join(self.cache, self.bk.map_cache_name(self.it, self.u("20261121"))))  # else it is reused
+        self.build()
+        self.assertEqual(self.it["_map"]["protomaps_build"], "20261122")
+
+    def test_broken_http_response_tries_the_next_build(self):
+        import http.client
+        fake = FakeProtomaps(self.files)
+        real_open = fake.open
+
+        def open_(req, timeout=None):
+            if req.full_url == self.u("20261121"):
+                raise http.client.IncompleteRead(b"PM")
+            return real_open(req, timeout)
+        fake.open = open_
+        self.bk.OPENER = fake
+        self.bk.map_cached(self.it, {"tools": {}}, self.cache, self.tool)
+        self.assertEqual(self.it["_map"]["protomaps_build"], "20261118")
 
     def test_cached_extract_of_a_listed_build_is_reused(self):
         # e.g. --fetch-only extracted 20261118 (or GCS had it), and 20261121 appeared before the build step
@@ -678,6 +715,7 @@ open(a[2], "w").write(a[1])
         info = self.bk.write_info(out, "small", [self.it], "v1", "abc", False)["items"][0]
         self.assertEqual(info["url"], self.u("20261121"))
         self.assertEqual(info["protomaps_build"], "20261121")
+        self.assertEqual(info["tiles_version"], "4.15.2")
         self.assertEqual(info["requested_url"], self.u("20261115"))
         self.assertTrue(info["fallback"])
         self.assertEqual(json.load(open(os.path.join(out, "KIT-INFO.json")))["items"][0], info)

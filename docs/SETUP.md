@@ -213,10 +213,15 @@ Notes:
   build: map data, not code. Its hash goes into the kit's `SHA256SUMS`. Protomaps deletes builds after
   about a week, so the manifest URL is only the *preferred* build. If it returns 404 (or the item has
   `"build": "latest"`), `build_kit.py` reads <https://build-metadata.protomaps.dev/builds.json> and uses
-  the newest listed build, or the next newest if that one fails. It always builds the URL itself, as
-  `https://build.protomaps.com/<YYYYMMDD>.pmtiles`. The build actually used is in `KIT-INFO.json` (`url`,
-  `protomaps_build`, `requested_url`, `fallback`). Updating the date is optional: it only saves a 404
-  and keeps the GCS map cache hitting for as long as that build exists.
+  the newest listed build, or the next newest if that one fails (at most 5). Only builds whose tile
+  schema major version (`version` in builds.json) equals the item's `tiles_major` are used, because the
+  pinned `js-basemaps` style only renders that schema: bump both together. It always builds the URL
+  itself, as `https://build.protomaps.com/<YYYYMMDD>.pmtiles`. An extract already in the cache is reused
+  only if it is of the manifest's build or one of those 5 candidates. The build actually used is in
+  `KIT-INFO.json` (`url`, `protomaps_build`, `tiles_version`, `requested_url`, `fallback`).
+* Updating the date is optional, but worth doing now and then. Once the manifest's build is gone, each
+  run falls back to the newest build, which changes daily. So most runs miss the GCS map cache and push
+  a new ~GB object under `cache/pmtiles/`. A lifecycle rule on that prefix also keeps it in check.
 
 ## 5. Build locally (optional)
 
