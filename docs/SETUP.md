@@ -148,7 +148,7 @@ Big downloads are kept in the kit bucket so each file comes from upstream once:
 
 ```
 gs://BUCKET/cache/sha256/<sha256>                     a pinned download (model, ZIM, binary), named by its hash
-gs://BUCKET/cache/pmtiles/<key>-australia.pmtiles     the map extract (+ .sha256 next to it)
+gs://BUCKET/cache/pmtiles/<key>-australia.pmtiles     the map extract (+ .sha256 next to it); <key> is from the build actually used
 ```
 
 * `build_kit.py --cache-plan` lists the files of the tier (≥ 32 MB). `tools/gcs_cache.sh pull` copies the
@@ -209,8 +209,14 @@ Notes:
 * Three manuals (FM 4-25.11, USMC Wilderness Medicine, WA DoH water) are `zim-extract` items. They are pulled from the
   pinned zimgit ZIMs, and their own sha256 is checked. This needs `libzim`:
   `pip install --require-hashes --only-binary :all: -r tools/requirements-build.txt`.
-* The map (`map-australia`) is the only unpinnable item. It is a go-pmtiles extract of a dated Protomaps
-  build: map data, not code. Its hash goes into the kit's `SHA256SUMS`.
+* The map (`map-australia`) is the only unpinnable item. It is a go-pmtiles extract of a daily Protomaps
+  build: map data, not code. Its hash goes into the kit's `SHA256SUMS`. Protomaps deletes builds after
+  about a week, so the manifest URL is only the *preferred* build. If it returns 404 (or the item has
+  `"build": "latest"`), `build_kit.py` reads <https://build-metadata.protomaps.dev/builds.json> and uses
+  the newest listed build, or the next newest if that one fails. It always builds the URL itself, as
+  `https://build.protomaps.com/<YYYYMMDD>.pmtiles`. The build actually used is in `KIT-INFO.json` (`url`,
+  `protomaps_build`, `requested_url`, `fallback`). Updating the date is optional: it only saves a 404
+  and keeps the GCS map cache hitting for as long as that build exists.
 
 ## 5. Build locally (optional)
 
