@@ -17,8 +17,8 @@ step with it:
   when GPU was set by hand.
 * Switch requests (model + optional cpu=on|off) are validated by pick-model.ps1 -CheckOnly; the
   toggle restarts with GPU=disable or the user's own GPU value.
-* GPU engine: llama.cpp's Vulkan llama-server (bin\\llama-vulkan) when present and GPU is unset or
-  vulkan; if it exits or hangs, llamafile on the GPU, then the CPU. Both run through tools\\run-ai.bat,
+* GPU engine: llama.cpp's Vulkan llama-server (bin\\llama-vulkan) when present and a GPU was detected
+  (GPU_MB > 0) or GPU=vulkan; no-GPU machines keep llamafile. If it exits or hangs, llamafile on the GPU, then the CPU. Both run through tools\\run-ai.bat,
   which logs the exit code. A second start is refused. Vulkan coopmat2 is turned off on Turing
   (GPU_CC 7.5) for llamafile only, unless the user set GGML_VK_DISABLE_COOPMAT2.
 """
@@ -111,8 +111,12 @@ def L(name):
 seg = text[L("start_llm"):L("started_llm")]
 check("llama-server only with ENGINE=auto, no engine fallback yet, and the build present",
       'if /i "%ENGINE%"=="auto" if not defined ENGINE_FALLBACK if exist "bin\\llama-vulkan\\llama-server.exe" (' in seg)
-check("llama-server only with GPU unset or vulkan (llamafile-only --gpu values keep llamafile)",
-      "if not defined GPU set USE_SRV=1" in seg and 'if /i "%GPU%"=="vulkan" set USE_SRV=1' in seg)
+check("llama-server with GPU unset only when a GPU was detected (GPU_MB not empty, not 0)",
+      'if not defined GPU if not "%GPU_MB%"=="" if not "%GPU_MB%"=="0" set USE_SRV=1' in seg)
+check("...or with GPU=vulkan set by hand (llamafile-only --gpu values keep llamafile)",
+      'if /i "%GPU%"=="vulkan" set USE_SRV=1' in seg)
+check("no other way to set USE_SRV=1 (no-GPU machines keep llamafile)",
+      len(re.findall(r"set USE_SRV=1", seg)) == 2 and "if not defined GPU set USE_SRV=1" not in seg)
 check("ENGINE validated (auto/llamafile)", first(r"ENGINE must be auto or llamafile") >= 0)
 check("llama-server flash attention: FA if set, else auto",
       'set "SRV_FA=%USER_FA%"' in seg and "if not defined SRV_FA set SRV_FA=auto" in seg and 'set "GPUARG=-fa %SRV_FA%"' in seg)
@@ -125,11 +129,13 @@ seg = text[L("llm_exited"):L("exit_reason")]
 check("llama-server exit -> engine_fallback before the GPU/CPU checks",
       seg.index('if /i "%LLM_EXE%"=="llama-server.exe" goto engine_fallback') < seg.index("if defined GPU goto llm_dead"))
 seg = text[L("llm_hung"):L("cpu_fallback")]
-check("llama-server hang -> kill and engine_fallback", seg.index('if /i "%LLM_EXE%"=="llama-server.exe" (') < seg.index("goto engine_fallback")
-      < seg.index("if defined GPU goto llm_slow") and "call :kill_llm" in seg)
+check("hang: slow-load rules first (GPU pinned / no GPU -> left running), then llama-server -> engine_fallback",
+      seg.index("if defined GPU goto llm_slow") < seg.index('"%LLM_VRAM%"=="0" goto llm_slow') < seg.index("call :kill_llm")
+      < seg.index('if /i "%LLM_EXE%"=="llama-server.exe" goto engine_fallback') < seg.index("goto cpu_fallback"))
 seg = text[L("engine_fallback"):L("kill_llm")]
-check("engine_fallback sets ENGINE_FALLBACK=1 and restarts (same model, no re-pick)",
-      "set ENGINE_FALLBACK=1" in seg and "call :start_llm" in seg and "%PICK%" not in seg)
+check("engine_fallback sets ENGINE_FALLBACK=1, bumps LLM_RUN, re-picks (models.json) and restarts",
+      all(s in seg for s in ("set ENGINE_FALLBACK=1", "set /a LLM_RUN+=1", "%PICK%", "call :start_llm"))
+      and seg.index("set ENGINE_FALLBACK=1") < seg.index("%PICK%"))
 check("cpu=off toggle clears ENGINE_FALLBACK (tries llama-server again)",
       re.search(r'if /i "%REQ_CPU%"=="off" \(\r\n(?:.*\r\n)*?\s+set ENGINE_FALLBACK=\r\n', body) is not None)
 seg = text[L("kill_llm"):]
@@ -143,6 +149,8 @@ check("running launcher detected before this window takes the title",
 check("running engine detected before the title",
       0 < first(r"for %%e in \(llamafile\.exe llama-server\.exe\) do .*goto already_running") < title)
 check("already_running explains and exits", ":already_running" in text and "run stop.bat first" in text)
+check("already_running names the engines (it also fires for an unrelated llamafile / llama-server)",
+      "an AI engine (llamafile / llama-server) is already running" in text)
 
 # --- Vulkan coopmat2: off on Turing (GPU_CC 7.5) for llamafile only; the user's value wins ---
 check("user's GGML_VK_DISABLE_COOPMAT2 captured before any start",

@@ -72,7 +72,8 @@ compare it with the first word of the `.sha256` file.
   is kept. It uses the same 127.0.0.1:8079 switch service and per-run token as *Use* (the request carries a
   third line, `cpu=on` or `cpu=off`, validated as strictly as the model path), so it is laptop-only too.
 * **Windows GPU engine: llama.cpp's `llama-server` (Vulkan).** `start.bat` runs GPU starts on
-  `bin\llama-vulkan\llama-server.exe` (llama.cpp b12626) when `GPU` is unset or `vulkan`. Its newer ggml has
+  `bin\llama-vulkan\llama-server.exe` (llama.cpp b12626) when a GPU was detected (the picker saw GPU memory)
+  and `GPU` is unset, or when you set `GPU=vulkan`. With no GPU detected, llamafile runs as before. Its newer ggml has
   no long-prompt crash on Turing cards (below), reads prompts about twice as fast as llamafile 0.10.6 and
   answers slightly faster (RTX 2070 Max-Q, Qwen3 8B: ~1,100 vs ~550 tok/s prompt, 32-36 vs 22-31 tok/s
   answers). Flash attention is `auto` there (`FA=` still overrides) - it switches itself off where the GPU
@@ -84,8 +85,9 @@ compare it with the first word of the `.sha256` file.
   `-fa off` (Vulkan flash attention can segfault). On NVIDIA compute capability 7.5 (Turing: RTX 20xx,
   GTX 16xx), `start.bat` also sets `GGML_VK_DISABLE_COOPMAT2=1` for llamafile (long prompts crash it
   otherwise). See *Troubleshooting*.
-* **One copy at a time.** `start.bat` refuses to start while the kit or its AI is already running (Windows
-  lets a second AI server listen on port 8080 next to the first, without an error). Run `stop.bat` first.
+* **One copy at a time.** `start.bat` refuses to start while the kit, or any llamafile / llama-server, is
+  already running (Windows lets a second AI server listen on port 8080 next to the first, without an error).
+  Run `stop.bat` first; it stops those engines too.
 * **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU, or is still not answering
   `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change) while a GPU is in use, the
   launcher restarts it once with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
@@ -111,8 +113,9 @@ compare it with the first word of the `.sha256` file.
   AI is ready, and whether it fell back to the CPU. Logs on Linux: `$TMPDIR/offline-toolkit-logs/llamafile.log`
   (`llamafile-gpu.log` for a failed GPU attempt). On Windows: `%TEMP%\offline-kit-ai.log` (the current AI)
   and `%TEMP%\offline-kit-ai.crash.log` (the last one that stopped, with its exit code).
-* **"The Offline Kit (or its AI) is already running".** It is - open <http://localhost:8000/>, or run
-  `stop.bat` and then `start.bat` to restart it.
+* **"The Offline Kit or an AI engine (llamafile / llama-server) is already running".** Open
+  <http://localhost:8000/> if it is the kit, or run `stop.bat` (it also stops a stray llamafile / llama-server)
+  and then `start.bat`.
 * **OBS Studio installed (Windows).** OBS registers an implicit Vulkan layer (`VK_LAYER_OBS_HOOK`,
   `C:\ProgramData\obs-studio-hook\obs-vulkan64.json`) that crashes llamafile 0.10.6's Vulkan init with
   0xC0000005, even at `-ngl 1`. The launchers set `DISABLE_VULKAN_OBS_CAPTURE=1` and

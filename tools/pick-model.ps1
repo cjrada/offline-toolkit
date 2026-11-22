@@ -108,6 +108,7 @@ $fallback = ($env:GPU_FALLBACK -eq '1')
 $cpuOnly = ($env:GPU -eq 'disable')
 if ($fallback) { $reason = "GPU mode failed, running on the CPU; $reason" }
 elseif ($cpuOnly) { $reason = "CPU only; $reason" }
+elseif ($env:ENGINE_FALLBACK -eq '1') { $reason = "llama-server failed, llamafile on the GPU; $reason" }
 if (-not $ctx) { $ctx = if ($fit -eq 'gpu' -or $fit -eq 'ram') { '8192' } else { '4096' } }
 $mm = $model -replace '\.gguf$', '.mmproj.gguf'
 $mmproj = if (Test-Path -LiteralPath $mm -PathType Leaf) { $mm } else { '' }

@@ -10,7 +10,8 @@ rem   Vulkan coopmat2 (NV_cooperative_matrix2) throws an uncaught C++ exception 
 rem   prompts (RTX 2070 Max-Q, driver 621.14) - on NVIDIA compute capability 7.5 (Turing: RTX 20xx, GTX 16xx)
 rem   GGML_VK_DISABLE_COOPMAT2=1 is set. Set it yourself to 0 (keep coopmat2) or 1 (always off).
 rem   Also: set NGL=33 (GPU layers; default: the engine decides).
-rem GPU engine: if bin\llama-vulkan\llama-server.exe exists (llama.cpp b12626 Vulkan build), GPU starts use it
+rem GPU engine: if bin\llama-vulkan\llama-server.exe exists (llama.cpp b12626 Vulkan build), GPU starts (a GPU
+rem   detected - GPU_MB > 0 - or GPU=vulkan) use it
 rem   (newer ggml: no coopmat2 crash, ~2x faster prompt reading); flash attention defaults to auto there and
 rem   the coopmat2 workaround is not applied. CPU starts (GPU=disable, fallback) and llamafile-only --gpu
 rem   values (GPU=nvidia/amd/...) still use llamafile. set ENGINE=llamafile to use llamafile on the GPU too.
@@ -184,28 +185,37 @@ exit /b 0
 rem Alive but never answered /health within LOAD_TIMEOUT: a hang during load. Retry on the CPU only if a
 rem GPU was in use for this start (GPU_MB > 0, GPU not pinned by hand). Any other slow load (CPU only,
 rem no GPU) is reported once and left running; the health poll goes on so "ready" is still shown.
+rem A hung llama-server (auto GPU start) moves to llamafile on the GPU instead of the CPU.
 :llm_hung
 set LLM_HUNG=
-if /i "%LLM_EXE%"=="llama-server.exe" (
-  set "FAIL_WHY=AI not ready after %LOAD_TIMEOUT% s"
-  set LLM_UP=
-  call :kill_llm
-  ping -n 3 127.0.0.1 >nul
-  goto engine_fallback
-)
 if defined GPU goto llm_slow
 if "%LLM_VRAM%"=="0" goto llm_slow
 set "FAIL_WHY=AI not ready after %LOAD_TIMEOUT% s"
 set LLM_UP=
 call :kill_llm
 ping -n 3 127.0.0.1 >nul
+if /i "%LLM_EXE%"=="llama-server.exe" goto engine_fallback
 goto cpu_fallback
 
 rem llama-server failed or hung on the GPU: try llamafile on the GPU (with its Vulkan workarounds) before
-rem giving up on the GPU. Same model; no re-pick.
+rem giving up on the GPU. Re-picked like the CPU fallback (same GPU memory, so the same model) so
+rem models.json gets the new run number and says why; ENGINE_FALLBACK=1 adds that to REASON.
 :engine_fallback
 echo llama-server failed (%FAIL_WHY%) - trying llamafile on the GPU.
 set ENGINE_FALLBACK=1
+set "MODEL=%USER_MODEL%"
+set "CTX=%USER_CTX%"
+set /a LLM_RUN+=1
+set PICKED=
+for /f "usebackq tokens=1,* delims==" %%a in (`%PICK% 2^>nul`) do (
+  set "%%a=%%b"
+  set PICKED=1
+)
+if not defined PICKED (
+  rem PowerShell unavailable: keep the model that was running.
+  set "MODEL=%LAST_MODEL%"
+  set "REASON=llama-server failed, llamafile on the GPU"
+)
 call :start_llm
 goto watch
 
@@ -261,10 +271,12 @@ exit /b 0
 :start_llm
 set MMARG=
 if defined MMPROJ set MMARG=--mmproj "%MMPROJ%"
-rem llama-server for GPU starts with GPU unset or vulkan, when it is in the kit and ENGINE is not llamafile.
+rem llama-server only for real GPU starts: GPU unset and a GPU detected (GPU_MB > 0; empty = PowerShell
+rem missing, unknown), or GPU=vulkan set by hand - when it is in the kit and ENGINE is not llamafile.
+rem Without a detected GPU, llamafile runs as before (and a slow load is left running).
 set USE_SRV=
 if /i "%ENGINE%"=="auto" if not defined ENGINE_FALLBACK if exist "bin\llama-vulkan\llama-server.exe" (
-  if not defined GPU set USE_SRV=1
+  if not defined GPU if not "%GPU_MB%"=="" if not "%GPU_MB%"=="0" set USE_SRV=1
   if /i "%GPU%"=="vulkan" set USE_SRV=1
 )
 if defined USE_SRV goto start_srv
@@ -319,7 +331,8 @@ if not defined HAVE_CURL set LLM_READY=unknown
 exit /b 0
 
 :already_running
-echo The Offline Kit (or its AI) is already running - open http://localhost:8000/
-echo To restart it, run stop.bat first, then start.bat again.
+echo The Offline Kit or an AI engine (llamafile / llama-server) is already running.
+echo If it is the kit, open http://localhost:8000/ - to restart, run stop.bat first (it also stops
+echo those engines), then start.bat again.
 pause
 exit /b 1

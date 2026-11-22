@@ -79,4 +79,7 @@ smi(){ env -u MODEL -u CTX -u GPU -u VRAM_MB RAM_MB=15800 PATH="$T/fakebin:$PATH
 out=$(smi); expect "nvidia-smi VRAM" "$out" 'GPU_MB=8192'; expect "GPU_CC lists each GPU" "$out" 'GPU_CC=7.5 8.6'
 out=$(smi FAKE_SMI_OLD=1); expect "old nvidia-smi: VRAM still read" "$out" 'GPU_MB=8192'; expect "old nvidia-smi: GPU_CC empty" "$out" 'GPU_CC= '
 expect "GPU_CC empty with GPU=disable" "$(smi GPU=disable)" 'GPU_CC= '
+# start.bat's engine fallback (llama-server failed -> llamafile on the GPU) re-picks with ENGINE_FALLBACK=1
+expect "engine fallback in REASON" "$(smi ENGINE_FALLBACK=1)" 'REASON=llama-server failed, llamafile on the GPU;'
+expect "CPU fallback wins over engine fallback" "$(smi ENGINE_FALLBACK=1 GPU_FALLBACK=1 GPU=disable)" 'REASON=GPU mode failed, running on the CPU;'
 exit $fail
