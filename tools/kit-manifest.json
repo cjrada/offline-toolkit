@@ -47,7 +47,7 @@
      "flatten": true, "dest": "bin/llama-vulkan/", "mode": "755"},
     {"id": "llama-cpp-licence", "tier": "small", "kind": "file", "version": "b12626", "licence": "MIT",
      "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b12626/LICENSE",
-     "sha256": "bcd8ec749126d45cb06737d0690295d73df4b6e7e194205bcf91190368f27285", "size": 1099,
+     "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d", "size": 1078,
      "dest": "bin/llama-vulkan/LICENSE-llama.cpp"},
 
     {"id": "model-qwen3-4b", "tier": "small", "kind": "file", "version": "Qwen3-4B-Instruct-2507 Q4_K_M", "licence": "Apache-2.0",
