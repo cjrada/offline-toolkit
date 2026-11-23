@@ -17,7 +17,9 @@ is HTTPS-only, redirects included. aria2c cannot refuse a redirect, so it is onl
 URLs (Kiwix metalink mirrors, or a redirect target already resolved over HTTPS); if a server still
 redirected it elsewhere, the pin check catches any changed byte and the HTTPS-only fallback runs. Nothing downloaded is executed, except go-pmtiles,
 which is built from source by `go install` (verified by the Go checksum database). Archives are
-extracted member-by-member with path checks (no absolute paths, no '..', no links).
+extracted member-by-member with path checks (no absolute paths, no '..', no links). The map is only ever
+extracted from https://build.protomaps.com/<YYYYMMDD>.pmtiles: the manifest's build or, once Protomaps
+has deleted it, the newest build its builds.json still lists (see map_sources).
 
 Speed: big files are fetched with aria2c (several connections) when it is installed, and download.kiwix.org
 ZIMs also from the HTTPS mirrors in Kiwix's official metalink (<url>.meta4) whose size and sha-256 match
@@ -26,7 +28,7 @@ manifest URL. Several items download at once (--jobs). Each download logs its so
 Cloud Build also keeps a shared cache of pinned files in GCS (tools/gcs_cache.sh, --cache-plan); anything
 that comes from a cache is checked against the pin exactly like a fresh download.
 """
-import argparse, concurrent.futures, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, threading, time
+import argparse, concurrent.futures, fnmatch, hashlib, http.client, json, os, re, shutil, stat, subprocess, sys, tarfile, threading, time
 import urllib.error, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
@@ -41,6 +43,9 @@ ARIA2_MIN = 64 * 1000 * 1000   # use aria2c for files at least this big (or of u
 MAX_MIRRORS = 8
 CACHE_PLAN_MIN = 32 * 1000 * 1000  # --cache-plan: only share files at least this big through GCS
 KIWIX_HOST = "download.kiwix.org"
+PROTOMAPS_HOST = "build.protomaps.com"  # map extracts only ever come from here, over HTTPS
+PROTOMAPS_BUILDS = "https://build-metadata.protomaps.dev/builds.json"  # Protomaps' list of daily builds it still serves
+MAP_FALLBACKS = 5  # newest listed builds to try (about a week of dailies) when the manifest's build is gone
 METALINK_NS = "{urn:ietf:params:xml:ns:metalink}"
 
 
@@ -72,6 +77,14 @@ def load_manifest(path):
             die(f"{it['id']}: bad kind {it['kind']!r}")
         if "url" in it:
             check_url(it["url"], it["id"])
+        if it["kind"] == "pmtiles":
+            if it.get("build", "manifest") not in ("manifest", "latest"):
+                die(f"{it['id']}: \"build\" must be \"manifest\" or \"latest\", got {it['build']!r}")
+            tm = it.get("tiles_major")
+            if tm is not None and (type(tm) is not int or tm < 1):
+                die(f"{it['id']}: \"tiles_major\" must be a positive integer, got {tm!r}")
+            if urllib.parse.urlparse(it["url"]).scheme == "https" and not protomaps_build(it["url"]):
+                die(f"{it['id']}: map url must be https://{PROTOMAPS_HOST}/<YYYYMMDD>.pmtiles, got {it['url']!r}")
         if it["kind"] == "git" and not re.fullmatch(r"[0-9a-f]{40}", it.get("commit") or ""):
             die(f"{it['id']}: git items need a full 40-hex \"commit\"")
         safe_rel(it["dest"].rstrip("/"), it["id"])
@@ -436,17 +449,22 @@ def summary(items):
         log(f"  downloaded {tot_b / 1e9:,.1f} GB, {fmt_dur(tot_s)} summed over items")
 
 
-def cache_plan(items, path):
+def cache_plan(items, path, cache=None):
     """Write the objects tools/gcs_cache.sh may share for these items: "<object> <cache file> <sha256|->".
     Pinned downloads are stored under cache/sha256/<sha256>; map extracts (unpinnable) under
-    cache/pmtiles/<cache file>, with their hash in a .sha256 object next to them."""
+    cache/pmtiles/<cache file>, with their hash in a .sha256 object next to them. The map's build is
+    resolved now (network), so the object is the extract of the build the fetch step will use."""
     lines = []
     for it in items:
         if it["kind"] in ("file", "tar", "zip") and it.get("sha256") and (it.get("size") or 0) >= CACHE_PLAN_MIN \
                 and urllib.parse.urlparse(it["url"]).scheme == "https":
             lines.append(f"cache/sha256/{it['sha256']} {cache_name(it)} {it['sha256']}")
         elif it["kind"] == "pmtiles":
-            name = map_cache_name(it)
+            url = resolve_map(it, cache)  # the build the fetch step will use (normally the same one)
+            if not url:
+                log(f"  WARNING {it['id']}: no Protomaps build available right now; not in the cache plan")
+                continue
+            name = map_cache_name(it, url)
             lines.append(f"cache/pmtiles/{name} {name} -")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("".join(x + "\n" for x in lines))
@@ -636,28 +654,170 @@ def pmtiles_tool(m, cache, given):
     return exe
 
 
-def map_cache_name(it):
-    key = hashlib.sha256(f"{it['url']}|{it['bbox']}|{it['maxzoom']}".encode()).hexdigest()[:16]
+# Protomaps publishes a planet build every day and deletes old ones after about a week, so a dated URL in
+# the manifest stops working on its own. The map item names a preferred build; when that one is gone (or
+# the item says "build": "latest") the newest builds Protomaps still lists are used instead. The extract
+# is map data, not code, and is hashed into SHA256SUMS; KIT-INFO.json records the build actually used.
+def protomaps_build(url):
+    """'20261121' for https://build.protomaps.com/20261121.pmtiles; None for any other URL."""
+    p = urllib.parse.urlparse(url)
+    m = re.fullmatch(r"/(\d{8})\.pmtiles", p.path)
+    if p.scheme != "https" or p.netloc != PROTOMAPS_HOST or p.query or p.fragment or not m:
+        return None  # netloc, not hostname: no port, user info or other casing slips through
+    return m.group(1)
+
+
+def protomaps_url(build):
+    return f"https://{PROTOMAPS_HOST}/{build}.pmtiles"
+
+
+def parse_builds(data):
+    """[(date, version)] for the builds listed in Protomaps' builds.json, newest first. From each entry
+    ({"key": "20261121.pmtiles", "version": "4.15.2", ...}) only the date and the tile schema version
+    (None if missing or malformed) are taken; the URL is always rebuilt on build.protomaps.com."""
+    doc = json.loads(data)
+    if isinstance(doc, dict):
+        doc = doc.get("builds")
+    if not isinstance(doc, list):
+        raise ValueError("builds.json is not a list of builds")
+    found = {}
+    for e in doc:
+        key = e.get("key") if isinstance(e, dict) else e
+        m = re.fullmatch(r"(\d{8})(?:\.pmtiles)?", key.strip()) if isinstance(key, str) else None
+        if m:
+            ver = e.get("version") if isinstance(e, dict) else None
+            found[m.group(1)] = ver if isinstance(ver, str) and re.fullmatch(r"\d{1,4}(\.\d{1,6}){0,3}", ver) else None
+    if not found:
+        raise ValueError("builds.json lists no builds")
+    return sorted(found.items(), reverse=True)
+
+
+def tiles_major(version):
+    """4 for tile schema version '4.15.2'; None if unknown."""
+    return int(version.split(".")[0]) if version else None
+
+
+def list_builds():
+    with OPENER.open(urllib.request.Request(PROTOMAPS_BUILDS, headers={"User-Agent": UA}), timeout=30) as r:
+        return parse_builds(r.read(4 << 20))
+
+
+def builds_listed(it):
+    """builds.json as [(date, version)], read at most once per item per run; [] if it cannot be read."""
+    if "_builds" not in it:
+        try:
+            it["_builds"] = list_builds()
+        except Exception as e:
+            log(f"  [{it['id']}] could not read the list of Protomaps builds ({type(e).__name__}: {e})")
+            it["_builds"] = []
+    return it["_builds"]
+
+
+def probe_map(url):
+    """None if url serves a PMTiles archive (checks its 7-byte magic), else why not, e.g. 'HTTP 404'."""
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-6"})
+    try:
+        with OPENER.open(req, timeout=30) as r:
+            head = r.read(7)
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code}"
+    except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError, ValueError) as e:
+        return f"{type(e).__name__}: {e}"  # e.g. IncompleteRead, BadStatusLine: try the next build
+    return None if head == b"PMTiles" else "not a PMTiles archive"
+
+
+def map_cache_name(it, url):
+    """Cache file of the extract of the build at url: keyed on the build actually used, so an extract of
+    one build is never reused under another's name."""
+    key = hashlib.sha256(f"{url}|{it['bbox']}|{it['maxzoom']}".encode()).hexdigest()[:16]
     return f"{key}-{os.path.basename(it['dest'])}"
 
 
+def map_sources(it, cache):
+    """URLs of the Protomaps builds to try, in order (lazily: builds.json is only read if needed). First the
+    manifest URL, unless "build": "latest". Then the fallback candidates: the newest MAP_FALLBACKS builds in
+    builds.json whose tile schema major version is the item's "tiles_major" (a newer schema would not
+    render with the pinned @protomaps/basemaps style). Of those, one whose extract is already in the cache
+    comes first, so --fetch-only and the build after it, or a GCS cache hit, agree; extracts of any other
+    build are never used."""
+    first = None if it.get("build") == "latest" else it["url"]
+    if first:
+        yield first
+    want, ok, skipped = it.get("tiles_major"), [], []
+    for date, ver in builds_listed(it):
+        url = protomaps_url(date)
+        if url == first:
+            continue
+        if want is not None and tiles_major(ver) != want:
+            if not ok:  # only worth saying for builds newer than the one we fall back to
+                skipped.append(f"{date} (tiles {ver or 'version unknown'})")
+            continue
+        ok.append(url)
+    if skipped:
+        log(f"  [{it['id']}] skipping Protomaps builds without v{want} tiles: " + ", ".join(skipped))
+    ok = ok[:MAP_FALLBACKS]
+    cached = [u for u in ok if cache and os.path.exists(os.path.join(cache, map_cache_name(it, u)))]
+    yield from cached[:1] + [u for u in ok if u not in cached[:1]]
+
+
+def resolve_map(it, cache=None):
+    """The URL map_cached would use (cached, or answering as a PMTiles archive), or None."""
+    for url in map_sources(it, cache):
+        if (cache and os.path.exists(os.path.join(cache, map_cache_name(it, url)))) or not probe_map(url):
+            return url
+        log(f"  [{it['id']}] {url} is not available")
+    return None
+
+
+def note_map(it, url):
+    req = None if it.get("build") == "latest" else it["url"]
+    build = protomaps_build(url)
+    ver = dict(builds_listed(it)).get(build) if build else None  # the manifest's build: only for the record
+    want = it.get("tiles_major")
+    if want is not None and ver and tiles_major(ver) != want:
+        log(f"  [{it['id']}] WARNING build {build} has tile schema {ver}, but the map item expects v{want}")
+    it["_map"] = {"url": url, "protomaps_build": build, "tiles_version": ver, "requested_url": req,
+                  "fallback": req is not None and url != req}  # true only if the manifest's build was asked for and not used
+    if req and url != req:
+        log(f"  [{it['id']}] WARNING the manifest's Protomaps build is no longer available; used build {build} "
+            f"instead. Consider updating the map url in tools/kit-manifest.json.")
+    log(f"  [{it['id']}] map from Protomaps build {build or url}")
+
+
 def map_cached(it, m, cache, tool):
-    cached = os.path.join(cache, map_cache_name(it))
-    if os.path.exists(cached):
-        how = "GCS cache" if os.path.basename(cached) in gcs_pulled(cache) else "local cache"
-        it.setdefault("_dl", {"how": how, "bytes": os.path.getsize(cached), "seconds": 0})
-    else:
-        exe = pmtiles_tool(m, cache, tool)
-        log(f"  extracting map {it['bbox']} z0-{it['maxzoom']} from {it['url']} (~GBs, takes a while)")
-        t0 = time.time()
-        subprocess.run([exe, "extract", it["url"], cached + ".part", f"--bbox={it['bbox']}",
-                        f"--maxzoom={it['maxzoom']}", "--download-threads=8"], check=True)
-        os.replace(cached + ".part", cached)
-        sec, n = time.time() - t0, os.path.getsize(cached)
-        it.setdefault("_dl", {"how": "go-pmtiles extract", "bytes": n, "seconds": round(sec, 1)})
-        log(f"  [{it['id']}] extracted {rate(n, sec)}")
-    it["_sha256"], it["_size"] = STAMPS.sha(cached), os.path.getsize(cached)
-    return cached
+    failed = []
+    for url in map_sources(it, cache):
+        cached = os.path.join(cache, map_cache_name(it, url))
+        if os.path.exists(cached):
+            how = "GCS cache" if os.path.basename(cached) in gcs_pulled(cache) else "local cache"
+            it.setdefault("_dl", {"how": how, "bytes": os.path.getsize(cached), "seconds": 0})
+        else:
+            why = probe_map(url)
+            if why:
+                log(f"  [{it['id']}] {url}: {why}; trying the next Protomaps build")
+                failed.append(f"{url}: {why}")
+                continue
+            exe = pmtiles_tool(m, cache, tool)
+            log(f"  extracting map {it['bbox']} z0-{it['maxzoom']} from {url} (~GBs, takes a while)")
+            t0 = time.time()
+            try:
+                subprocess.run([exe, "extract", url, cached + ".part", f"--bbox={it['bbox']}",
+                                f"--maxzoom={it['maxzoom']}", "--download-threads=8"], check=True)
+            except subprocess.CalledProcessError as e:
+                log(f"  [{it['id']}] extract from {url} failed (exit {e.returncode}); trying the next Protomaps build")
+                failed.append(f"{url}: extract exit {e.returncode}")
+                if os.path.exists(cached + ".part"):
+                    os.remove(cached + ".part")
+                continue
+            os.replace(cached + ".part", cached)
+            sec, n = time.time() - t0, os.path.getsize(cached)
+            it.setdefault("_dl", {"how": "go-pmtiles extract", "bytes": n, "seconds": round(sec, 1)})
+            log(f"  [{it['id']}] extracted {rate(n, sec)}")
+        note_map(it, url)
+        it["_sha256"], it["_size"] = STAMPS.sha(cached), os.path.getsize(cached)
+        return cached
+    die(f"{it['id']}: no Protomaps build could be used" + ("".join("\n  " + f for f in failed) or
+        f" (and {PROTOMAPS_BUILDS} could not be read)"))
 
 
 def build_map(it, m, out, cache, tool):
@@ -724,7 +884,8 @@ def write_info(out, tier, items, version, rev, dirty):
         "items": [{"id": it["id"], "version": it.get("version"), "licence": it.get("licence"),
                    "url": it.get("url") or f"zim:{it.get('source')}/{it.get('entry')}", "commit": it.get("commit"),
                    "dest": it["dest"], "sha256": it.get("_sha256"), "size": it.get("_size"),
-                   "pinned": pinned(it) and it.get("pin") != "none", "redistributable": it.get("redistributable", True)}
+                   "pinned": pinned(it) and it.get("pin") != "none", "redistributable": it.get("redistributable", True),
+                   **it.get("_map", {})}  # map: the Protomaps build actually used (its url replaces the manifest's)
                   for it in items],
     }
     with open(os.path.join(out, "KIT-INFO.json"), "w", encoding="utf-8") as fh:
@@ -833,7 +994,7 @@ def main(argv=None):
     if a.frozen and unpinned:
         die("--frozen: these items have no sha256 yet: " + ", ".join(unpinned) + "\n  run `python3 tools/build_kit.py --lock` and commit the manifest")
     if a.cache_plan:
-        cache_plan(items, a.cache_plan)
+        cache_plan(items, a.cache_plan, os.path.abspath(a.cache) if a.cache else None)
         return 0
 
     dist = os.path.join(ROOT, "dist")

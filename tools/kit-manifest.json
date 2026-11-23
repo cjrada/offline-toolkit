@@ -5,7 +5,7 @@
     "sha256/size: pinned content. null = not pinned yet; run `python3 tools/build_kit.py --lock` on a",
     "  trusted, networked machine, review the diff and commit it. --frozen (used by CI) refuses unpinned items.",
     "kind: file | tar | zip (download) | zim-extract (an entry from a pinned ZIM item, needs libzim) |",
-    "  git (a pinned commit; git verifies content) | pmtiles (map extract, data only, unpinnable).",
+    "  git (a pinned commit; git verifies content) | pmtiles (map extract, data only, unpinnable; falls back to the newest Protomaps build).",
     "replaces: ids of lower-tier items this one supersedes (e.g. WikiMed maxi replaces WikiMed mini).",
     "redistributable: false = may be built for personal use but must never be published (publish_gcs.py refuses)."
   ],
@@ -118,8 +118,8 @@
      "url": "https://github.com/protomaps/basemaps-assets.git", "commit": "028c18f713baecad011301ff7a69acc39bcc2ae7",
      "include": ["fonts/*", "sprites/v4/*"], "dest": "www/maps/"},
     {"id": "map-australia", "tier": "small", "kind": "pmtiles", "licence": "ODbL (c) OpenStreetMap contributors; Protomaps",
-     "_note": "Extracted with go-pmtiles from a dated Protomaps build. Output is data (not code) and is hashed into SHA256SUMS; it cannot be pinned in advance.",
-     "url": "https://build.protomaps.com/20261115.pmtiles", "bbox": "112.5,-44,154,-9.5", "maxzoom": 15,
+     "_note": "Extracted with go-pmtiles from a daily Protomaps build. Output is data (not code) and is hashed into SHA256SUMS; it cannot be pinned in advance. Protomaps deletes builds after about a week, so url is only the preferred build: when it is gone (HTTP 404), or with \"build\": \"latest\", build_kit.py uses the newest build listed in https://build-metadata.protomaps.dev/builds.json (next newest if one fails) whose tile schema major version is tiles_major (what the pinned js-basemaps style renders; bump both together). The url must be https://build.protomaps.com/<YYYYMMDD>.pmtiles. KIT-INFO.json records the build actually used (url, protomaps_build, tiles_version, requested_url, fallback); the extract cache is keyed on it.",
+     "url": "https://build.protomaps.com/20261121.pmtiles", "bbox": "112.5,-44,154,-9.5", "maxzoom": 15, "tiles_major": 4,
      "sha256": null, "size": null, "pin": "none", "dest": "www/maps/australia.pmtiles"},
 
     {"id": "model-qwen3-8b", "tier": "medium", "kind": "file", "version": "Qwen3-8B Q4_K_M", "licence": "Apache-2.0",

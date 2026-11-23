@@ -200,13 +200,17 @@ Add documents:
 
 ### Maps
 `www/maps/australia.pmtiles` is a Protomaps (OpenStreetMap) vector extract of Australia (bbox 112.5,-44,154,-9.5,
-zoom 0-15, build 2026-11-15) shown with MapLibre GL. Pan/zoom to street level, coordinates under the cursor,
+zoom 0-15) shown with MapLibre GL. The Protomaps build it came from is in `KIT-INFO.json` (`protomaps_build`). Pan/zoom to street level, coordinates under the cursor,
 "locate me" button (works on the laptop via localhost; phones need GPS + HTTPS, so on a phone use **Organic Maps**).
 No offline address search/routing in the browser viewer.
 **Phone recommendation:** Organic Maps (free, open source, Android/iOS) - download the Australia regions while
 online; it does offline search and turn-by-turn routing. Kiwix also has Android/iOS apps that open the same `.zim` files.
 Refresh the map: `pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles australia.pmtiles --bbox=112.5,-44,154,-9.5`
-(go-pmtiles, ~2.2 GB download).
+(go-pmtiles, ~2.2 GB download; current builds are listed in <https://build-metadata.protomaps.dev/builds.json>).
+Protomaps deletes daily builds after about a week. `tools/build_kit.py` tries the build named in
+`tools/kit-manifest.json` first; if it is gone (HTTP 404) it uses the newest build that `builds.json`
+lists with the same tile schema major version (`tiles_major`), or the next newest if that fails. It logs a warning and records the build in `KIT-INFO.json`,
+so an old date in the manifest never breaks a build.
 
 ## Recommended tiers
 
