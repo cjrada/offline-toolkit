@@ -51,7 +51,7 @@ class FakeS3:
                     self.fail.pop(i)
                     if resp == "drop":
                         raise OSError("connection reset")
-                    return resp, {}, b"<Error><Code>InternalError</Code></Error>"
+                    return self._err(resp, "InternalError" if resp >= 500 else "AccessDenied")
         if method == "GET" and not key:
             return self._list(qs)
         if method == "GET":
@@ -148,6 +148,9 @@ def kit(tmp, tier="small", version="v1", info=None):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        # Tests run the same locally and on a GitHub runner; GitHub mode is tested on its own below.
+        self._gha = os.environ.pop("GITHUB_ACTIONS", None)
+        self.addCleanup(lambda: self._gha is not None and os.environ.__setitem__("GITHUB_ACTIONS", self._gha))
         self.tmp = tempfile.mkdtemp()
         self.fake = FakeS3()
         pr.time.sleep = lambda s: None
@@ -167,7 +170,9 @@ class Base(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             rc = pr.main(args, env=dict(ENV if env is None else env), make_client=self.client)
         self.out = out.getvalue() + err.getvalue()
-        self.assertNotIn(ENV["R2_SECRET_ACCESS_KEY"], self.out, "secret printed")
+        # Only ::add-mask:: (GitHub hides the value it registers) may carry a secret.
+        logged = "\n".join(l for l in self.out.splitlines() if not l.startswith("::add-mask::"))
+        self.assertNotIn(ENV["R2_SECRET_ACCESS_KEY"], logged, "secret printed")
         self.assertNotIn("Signature=", self.out)
         return rc
 
@@ -231,6 +236,20 @@ class Config(unittest.TestCase):
 
 
 class Publish(Base):
+    def test_github_masks_and_never_logs_secrets(self):
+        os.environ["GITHUB_ACTIONS"] = "true"
+        try:
+            self.assertEqual(self.publish("small", "v1"), 0, self.out)
+            self.fake.fail = [("PUT", r"partNumber=1&", 403)]
+            self.assertEqual(self.publish("small", "v2"), 1)  # error path: S3 error body echoes the key id
+        finally:
+            del os.environ["GITHUB_ACTIONS"]
+        lines = self.out.splitlines()
+        self.assertIn(f"::add-mask::{ENV['R2_SECRET_ACCESS_KEY']}", lines)
+        for secret in (ENV["R2_SECRET_ACCESS_KEY"], ENV["R2_ACCESS_KEY_ID"]):
+            self.assertFalse([l for l in lines if secret in l and not l.startswith("::add-mask::")], secret)
+        self.assertTrue(any(l.startswith("::error::") for l in lines))
+
     def test_layout_and_manifests(self):
         self.assertEqual(self.publish("small", "v1"), 0, self.out)
         objs = self.fake.objects
