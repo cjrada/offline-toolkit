@@ -17,7 +17,8 @@ Offline and cheap: parses the workflow file, runs nothing, touches no artifacts 
   conditions, permissions and concurrency are exactly as reviewed; dry_run defaults to true; every action
   is SHA-pinned; only the publish job has an environment or id-token. The run list shows tier, version and
   dry run vs publish (run-name). Build and publish write a step summary even on failure; the Cloud Build id
-  is recorded by its own step before the wait. A `summary` job runs with if: always() (not limited to
+  is recorded by its own step before the wait (project checked before submitting). The auth, gcloud,
+  upload, cloudbuild, cbwait and result steps say if: success() && ... explicitly. A `summary` job runs with if: always() (not limited to
   main / v*, so it explains skipped runs), with no environment, no permissions, no secrets, no checkout.
 
 Uses a small parser for the block-style YAML subset GitHub workflows use (no PyYAML needed on the
@@ -321,6 +322,17 @@ def check_gating_and_visibility(text):
         problems.append("Cloud Build must be submitted by a step (id: cloudbuild) that records the id and a notice before any wait")
     if "steps.cloudbuild.outputs.id" not in str(wait.get("env", "")):
         problems.append("the Cloud Build wait step (id: cbwait) must use steps.cloudbuild.outputs.id")
+    # Steps that act on (or report) an earlier step's work must not run after a failure. GitHub adds success()
+    # implicitly to an if: without a status function; require it explicitly so the intent is reviewable.
+    for sid in ("auth", "gcloud", "upload", "cloudbuild", "cbwait", "result"):
+        cond = norm((steps.get(sid) or {}).get("if"))
+        if not cond.startswith("success() && "):
+            problems.append(f"publish step {sid!r} must have if: success() && ..., got {cond!r}")
+    cb_lines = str(cb.get("run", "")).splitlines()
+    check_at = [i for i, l in enumerate(cb_lines) if '"$project"' in l and "grep -Eqx" in l]
+    submit_at = [i for i, l in enumerate(cb_lines) if "gcloud builds submit" in l]
+    if not (check_at and submit_at and check_at[0] < submit_at[0]):
+        problems.append("the cloudbuild step must check the derived project before gcloud builds submit")
     res = steps.get("result") or {}
     if "::notice" not in str(res.get("run", "")) or "console.cloud.google.com" not in str(res.get("run", "")):
         problems.append("publish job must record console links and a ::notice for a published kit (id: result)")
@@ -378,6 +390,10 @@ def mutation_test(text):
     bad("      !cancelled() &&\n", "      always() &&\n", "publish job if", "publish if changed")
     bad("concurrency:\n  group: publish-kit-${{ github.ref }}\n", "concurrency:\n  group: publish-kit\n", "concurrency", "concurrency")
     bad("        id: cloudbuild\n", "        id: submit\n", "Cloud Build", "cloudbuild id renamed")
+    for sid in ("result", "cbwait", "upload", "auth"):
+        m = re.search(rf"(?m)^        id: {sid}\n        if: success\(\) && ", text)
+        assert m, f"{sid}: expected 'if: success() && ' right after its id"
+        bad(m.group(0), f"        id: {sid}\n        if: ", f"publish step {sid!r}", f"{sid} success() removed")
 
 
 # ---------------- self-test ----------------

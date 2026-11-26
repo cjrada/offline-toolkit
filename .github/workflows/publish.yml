@@ -350,7 +350,7 @@ jobs:
       # ---------------- Google credentials only from here on ----------------
       - name: Authenticate to Google Cloud (keyless)
         id: auth
-        if: steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.dry_run != 'true'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
@@ -358,12 +358,12 @@ jobs:
 
       - name: Set up gcloud
         id: gcloud
-        if: steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.dry_run != 'true'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Publish small kit to GCS
         id: upload
-        if: steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
           ZIP: ${{ steps.zip.outputs.path }}
           GCS_BUCKET: ${{ vars.GCS_BUCKET }}
@@ -374,7 +374,7 @@ jobs:
       # output, notice annotation) as soon as the build exists, even if the wait later fails or times out.
       - name: Submit ${{ steps.cfg.outputs.tier }} kit to Cloud Build
         id: cloudbuild
-        if: steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
           TIER: ${{ steps.cfg.outputs.tier }}
           VERSION: ${{ steps.cfg.outputs.version }}
@@ -383,10 +383,11 @@ jobs:
           GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
           project="${GCP_SERVICE_ACCOUNT#*@}"; project="${project%.iam.gserviceaccount.com}"
+          # Check the project before submitting, so nothing after the submit can fail and lose the build id.
+          echo "$project" | grep -Eqx '[a-z][a-z0-9-]{4,61}[a-z0-9]' || { echo "::error::cannot derive the project from GCP_SERVICE_ACCOUNT"; exit 1; }
           id=$(gcloud builds submit --project "$project" --no-source --config cloudbuild.yaml --async --format='value(id)' \
                  --substitutions "_TIER=$TIER,_VERSION=$VERSION,_COMMIT=$COMMIT,_BUCKET=$GCS_BUCKET")
           echo "$id" | grep -Eqx '[0-9A-Za-z-]{1,64}' || { echo "::error::unexpected Cloud Build id from gcloud"; exit 1; }
-          echo "$project" | grep -Eqx '[a-z][a-z0-9-]{4,61}[a-z0-9]' || { echo "::error::cannot derive the project from GCP_SERVICE_ACCOUNT"; exit 1; }
           url="https://console.cloud.google.com/cloud-build/builds/$id?project=$project"
           { echo "id=$id"; echo "project=$project"; echo "url=$url"; } >> "$GITHUB_OUTPUT"
           echo "Cloud Build $id started: $url"
@@ -394,7 +395,7 @@ jobs:
 
       - name: Wait for Cloud Build ${{ steps.cloudbuild.outputs.id }}
         id: cbwait
-        if: steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
           ID: ${{ steps.cloudbuild.outputs.id }}
           PROJECT: ${{ steps.cloudbuild.outputs.project }}
@@ -417,10 +418,10 @@ jobs:
             sleep 60
           done
 
-      # Only reached when the upload (small) or Cloud Build (medium/large) succeeded. Writes links only.
+      # success(): only after the upload (small) or the Cloud Build wait (medium/large) succeeded. Writes links only.
       - name: Record published kit
         id: result
-        if: steps.cfg.outputs.dry_run != 'true'
+        if: success() && steps.cfg.outputs.dry_run != 'true'
         env:
           TIER: ${{ steps.cfg.outputs.tier }}
           VERSION: ${{ steps.cfg.outputs.version }}
