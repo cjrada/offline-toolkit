@@ -100,6 +100,11 @@ At the end the script prints the exact `gh` commands for step 2.
   * Pick the tier and optionally a version. The default version is `yyyymmdd-<commit>`.
   * `dry_run` is on by default. For small it builds and checks everything without uploading. For medium/large it only validates the inputs and pins.
   * Untick it to publish.
+* **Reading a run:** the run list shows `publish-kit · <tier> · <version> · dry run|publish` (a run on a
+  ref other than `main` / `v*` also says it was skipped). The run's **Summary** tab has the inputs, each
+  job's result and the outcome, plus the Cloud Build link (medium/large) and, after an upload, the `gs://`
+  path and Cloud Console links to the zip, its `.sha256`, `KIT-INFO.json` and `latest.json`. The bucket is
+  private, so those links need a Google account with access; plain `storage.googleapis.com` URLs won't work.
 
 What happens:
 
