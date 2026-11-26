@@ -22,13 +22,16 @@ Order of a publish (each step only after the previous one succeeded):
   1. refuse a kit that is not redistributable, is from a dirty tree, has unpinned downloads or unsafe names;
      refuse if anything already exists under <tier>/<version>/ (versions are immutable)
   2. multipart-upload the zip (64 MiB+ parts, parallel, each part retried; aborted on failure, so no partial
-     object is left), then the .sha256 sidecar and KIT-INFO.json (If-None-Match: *)
+     object is left). CompleteMultipartUpload is create-only too: a HEAD just before, and If-None-Match: * on
+     the request (if the store says it does not implement that header, the HEAD alone stands, with a warning).
+     Then the .sha256 sidecar and KIT-INFO.json (If-None-Match: *)
   3. verify: HeadObject Content-Length == local size and x-amz-meta-sha256 == local sha256 (a multipart ETag
      is NOT an MD5 and is not used); the sidecar and KIT-INFO.json read back byte for byte. Each part was
      checked by R2 against the SHA-256 in its SigV4 signature and its Content-MD5.
   4. write <tier>/index.json, <tier>/latest.json, index.json, latest.json, then read them back and check they
      name this version with this sha256 and size
-  5. retention: only now delete versions of this tier beyond the newest N (the new one always counts and is
+  5. retention, planned from a fresh read of <tier>/index.json taken after verification (so a version another
+     publish indexed during a long upload is kept or retired, not dropped): only now delete versions of this tier beyond the newest N (the new one always counts and is
      never deleted). Defaults below; change DEFAULT_KEEP or pass --keep tier=N / KIT_KEEP="small=3,...".
 A dry run does steps 1 and the read-only parts of the plan and writes nothing.
 """
@@ -49,8 +52,9 @@ PUBLIC_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~-]+)*")
 GITHUB_HELP = """Set the repository variables in GitHub: Settings -> Secrets and variables -> Actions -> Variables:
   R2_BUCKET = the R2 bucket name
   R2_PUBLIC_URL = the public base URL (r2.dev or custom domain), no trailing slash"""
-SECRETS_HELP_GITHUB = ("Set the repository secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_ACCOUNT_ID "
-                       "(Settings -> Secrets and variables -> Actions -> Secrets).")
+SECRETS_HELP_GITHUB = ("Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_ACCOUNT_ID as secrets of the gcs-publish "
+                       "environment (Settings -> Environments -> gcs-publish -> Environment secrets), so they are "
+                       "released only after that approval on main or a v* tag.")
 SECRETS_HELP_GCP = ("Cloud Build reads them from Secret Manager: add a version to each of r2-access-key-id, "
                     "r2-secret-access-key and r2-account-id, e.g. `gcloud secrets versions add r2-secret-access-key "
                     "--data-file=-` and paste the value on stdin (docs/SETUP.md, scripts/setup-gcp.sh).")
@@ -69,7 +73,7 @@ def on_github():
 
 
 def mask(secret):
-    # GitHub masks repository secrets already; this also covers values that reach us some other way.
+    # GitHub masks its secrets already; this also covers values that reach us some other way.
     if on_github() and secret:
         print(f"::add-mask::{secret}", flush=True)
 
@@ -280,6 +284,32 @@ class R2:
         if st not in (200, 204, 404):
             raise Fail(f"deleting {key} failed: {s3_error(st, b)}")
 
+    def _complete(self, key, upload_id, body):
+        """CompleteMultipartUpload, create-only: the key is checked just before, and the request carries
+        If-None-Match: * so the store itself refuses to replace an object that appeared in between (S3 and moto
+        honour it). If the store answers that it does not implement the header, the HEAD check alone stands
+        and a warning says so: then a window of the few seconds between the check and the complete remains."""
+        gone = f"{key} appeared while this upload ran - versions are immutable; nothing was replaced"
+        if self.head(key) is not None:
+            raise Fail(gone)
+        h = {"Content-Type": "application/xml", "If-None-Match": "*"}
+        for _ in range(2):
+            st, _, b = self.call("POST", key, query={"uploadId": upload_id}, body=body, headers=h, ok=(200, 501),
+                                 what=f"completing {key}", timeout=600)
+            if st == 412 or b"<Code>PreconditionFailed</Code>" in b:
+                raise Fail(gone)
+            if "If-None-Match" in h and (st == 501 or b"<Code>NotImplemented</Code>" in b):
+                warn("the bucket does not accept If-None-Match on CompleteMultipartUpload; relying on the HEAD check "
+                     "made just before (a window of seconds remains)")
+                if self.head(key) is not None:
+                    raise Fail(gone)
+                h = {"Content-Type": "application/xml"}
+                continue
+            # S3 can answer 200 with an <Error> body for CompleteMultipartUpload.
+            if st != 200 or b"<Error>" in b:
+                raise Fail(f"completing {key} failed: {s3_error(st, b)}")
+            return
+
     def multipart(self, key, path, ctype, meta, jobs=4, part_size=None):
         size = os.path.getsize(path)
         part = part_size_for(size, part_size or PART)
@@ -330,11 +360,7 @@ class R2:
             body = ("<CompleteMultipartUpload>" + "".join(
                 f"<Part><PartNumber>{n}</PartNumber><ETag>{etags[n]}</ETag></Part>" for n in sorted(etags))
                 + "</CompleteMultipartUpload>").encode()
-            st, _, b = self.call("POST", key, query={"uploadId": upload_id}, body=body,
-                                 headers={"Content-Type": "application/xml"}, what=f"completing {key}", timeout=600)
-            # S3 can answer 200 with an <Error> body for CompleteMultipartUpload.
-            if st != 200 or b"<Error>" in b:
-                raise Fail(f"completing {key} failed: {s3_error(st, b)}")
+            self._complete(key, upload_id, body)
         except BaseException:
             try:
                 self.send("DELETE", key, query={"uploadId": upload_id})
@@ -579,6 +605,10 @@ def run(a, env, make_client=client_from_env):
     r2.put(keys["kit_info"], info_bytes, "application/json")
     verify_version(r2, keys, size, sha, sidecar, info_bytes)
 
+    # Plan again now, from a fresh read: an upload can take an hour, and another publish of this tier (a
+    # tag push and a main dispatch, or a Cloud Build the workflow stopped waiting for) may have indexed a
+    # version meanwhile. Planning from the read made before the upload would drop it from the index.
+    keep_prev, delete, _ = plan_retention(r2, tier, version, keep)
     entry = {"tier": tier, "name": name, "version": version, "published_at": now_iso(), "size": size, "sha256": sha,
              "git_commit": info.get("git_commit"), **keys}
     write_manifests(r2, tier, [entry] + keep_prev, keep)

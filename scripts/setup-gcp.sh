@@ -232,7 +232,9 @@ https://github.com/$REPO/settings/environments -> gcs-publish (create it, then "
 
 3. Kits go to Cloudflare R2. Set the repository variables (Settings -> Secrets and variables -> Actions ->
    Variables) R2_BUCKET = the R2 bucket name and R2_PUBLIC_URL = its public base URL (r2.dev or custom
-   domain, no trailing slash), and the repository secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID.
+   domain, no trailing slash). Put the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID in the
+   gcs-publish environment (Settings -> Environments -> gcs-publish -> Environment secrets), not at repository
+   level, and give the Cloudflare token Object Read & Write on the kit bucket only.
 
 4. Give Cloud Build (medium/large) the same R2 credentials in Secret Manager. Paste each value on stdin,
    so it is not in your shell history or on the command line, then press Enter and Ctrl-D:

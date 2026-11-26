@@ -27,6 +27,9 @@ class FakeS3:
         self.headers_seen = []
         self.corrupt_meta = False
         self.manifest_tamper = None  # key -> bytes served instead of what was written
+        self.inm_on_complete = True  # honour If-None-Match on CompleteMultipartUpload (False: answer 501)
+        self.on_first_part = None    # called once, before the first part is stored
+        self.hide_from_head = set()  # keys HEAD reports as missing (to reach the If-None-Match check)
 
     def _err(self, st, code):
         return st, {}, f"<Error><Code>{code}</Code><Message>m</Message><AWSAccessKeyId>AKIDTESTKEY</AWSAccessKeyId></Error>".encode()
@@ -61,7 +64,7 @@ class FakeS3:
                 return 200, {}, self.manifest_tamper[key]
             return 200, {}, self.objects[key]["data"]
         if method == "HEAD":
-            if key not in self.objects:
+            if key not in self.objects or key in self.hide_from_head:
                 return 404, {}, b""
             o = self.objects[key]
             meta = dict(o["meta"])
@@ -71,6 +74,9 @@ class FakeS3:
         if method in ("PUT", "POST") and body is not None:
             assert headers.get("content-type") not in (None, "application/x-www-form-urlencoded"), (method, url)
         if method == "PUT" and "partNumber" in qs:
+            hook, self.on_first_part = self.on_first_part, None
+            if hook:
+                hook(self)
             up = self.uploads[qs["uploadId"]]
             with self.lock:
                 up["parts"][int(qs["partNumber"])] = data
@@ -88,6 +94,11 @@ class FakeS3:
             self.uploads[uid] = {"key": key, "parts": {}, "meta": {k: v for k, v in headers.items() if k.startswith("x-amz-meta-")}}
             return 200, {}, f"<InitiateMultipartUploadResult><UploadId>{uid}</UploadId></InitiateMultipartUploadResult>".encode()
         if method == "POST" and "uploadId" in qs:
+            if headers.get("if-none-match") == "*":
+                if not self.inm_on_complete:
+                    return self._err(501, "NotImplemented")
+                if key in self.objects:
+                    return self._err(412, "PreconditionFailed")
             up = self.uploads.pop(qs["uploadId"])
             nums = [int(n) for n in re.findall(rb"<PartNumber>(\d+)</PartNumber>", data)]
             assert nums == sorted(up["parts"]), (nums, sorted(up["parts"]))
@@ -209,6 +220,10 @@ class Config(unittest.TestCase):
                        "R2_BUCKET = the R2 bucket name", "no trailing slash"):
             self.assertIn(needle, text)
 
+    def test_secret_help_points_at_the_environment(self):
+        self.assertIn("gcs-publish environment", pr.SECRETS_HELP_GITHUB)
+        self.assertNotIn("repository secret", pr.SECRETS_HELP_GITHUB)
+
     def test_wellformed(self):
         self.assertEqual(pr.config_problems(ENV, need_public_url=True), [])
         self.assertEqual(pr.public_base("https://pub-abc.r2.dev/"), "https://pub-abc.r2.dev")
@@ -304,6 +319,36 @@ class Publish(Base):
         self.assertEqual(self.publish("small", "v1"), 1)
         self.assertIn("already exists", self.out)
         self.assertNotIn("small/latest.json", self.fake.objects)
+
+    def test_zip_that_appears_during_upload_is_not_replaced(self):
+        def other(fake):  # e.g. a Cloud Build the workflow stopped waiting for finishes the same version
+            fake.objects["small/v1/offline-toolkit-small-v1.zip"] = {"data": b"theirs", "meta": {}, "ctype": "", "cc": None}
+        for inm in (True, False):
+            with self.subTest(if_none_match_supported=inm):
+                self.fake = FakeS3()
+                self.fake.inm_on_complete = inm
+                self.fake.on_first_part = other
+                self.assertEqual(self.publish("small", "v1"), 1)
+                self.assertIn("appeared while this upload ran", self.out)
+                self.assertEqual(self.fake.objects["small/v1/offline-toolkit-small-v1.zip"]["data"], b"theirs")
+                self.assertEqual(len(self.fake.aborts), 1)
+                self.assertNotIn("small/latest.json", self.fake.objects)
+        # the object appears after the HEAD check: only If-None-Match on the complete can stop it
+        self.fake = FakeS3()
+        self.fake.on_first_part = other
+        self.fake.hide_from_head = {"small/v1/offline-toolkit-small-v1.zip"}
+        self.assertEqual(self.publish("small", "v1"), 1)
+        self.assertIn("appeared while this upload ran", self.out)
+        self.assertEqual(self.fake.objects["small/v1/offline-toolkit-small-v1.zip"]["data"], b"theirs")
+
+    def test_complete_sends_if_none_match_and_falls_back(self):
+        self.assertEqual(self.publish("small", "v1"), 0)
+        completes = [h for h in self.fake.headers_seen if h.get("content-type") == "application/xml"]
+        self.assertTrue(completes and all(h.get("if-none-match") == "*" for h in completes))
+        self.fake.inm_on_complete = False
+        self.assertEqual(self.publish("small", "v2"), 0, self.out)
+        self.assertIn("does not accept If-None-Match on CompleteMultipartUpload", self.out)
+        self.assertEqual(self.versions("small"), ["v2", "v1"])
 
     def test_part_retries(self):
         self.fake.fail = [("PUT", r"partNumber=2&", 503), ("PUT", r"partNumber=3&", "drop"), ("PUT", r"partNumber=2&", 500)]
@@ -421,6 +466,30 @@ class Retention(Base):
         self.assertIn("not deleting large/a/", self.out)
         self.assertEqual(self.prefixes("large"), ["a", "b", "stray"])
         self.assertEqual(self.versions("large"), ["b"])
+
+    def test_concurrent_publish_during_upload_is_not_dropped(self):
+        # Another publish of the same tier indexes its version while this one uploads (a v* tag and a main
+        # dispatch, or a leftover Cloud Build). Planning from the pre-upload read would drop it from the index.
+        def sneak(tier, version):
+            def hook(fake):
+                k = pr.keys_for(tier, version)
+                for key in k.values():
+                    fake.objects[key] = {"data": b"x", "meta": {}, "ctype": "", "cc": None}
+                idx = json.loads(fake.objects[f"{tier}/index.json"]["data"])
+                idx["versions"].insert(0, {"tier": tier, "version": version, "size": 1, "sha256": "c" * 64, **k})
+                fake.objects[f"{tier}/index.json"]["data"] = json.dumps(idx).encode()
+            return hook
+        self.assertEqual(self.publish("medium", "m1"), 0)
+        self.fake.on_first_part = sneak("medium", "m-other")
+        self.assertEqual(self.publish("medium", "m2"), 0, self.out)
+        self.assertEqual(self.versions("medium"), ["m2", "m-other"])
+        self.assertEqual(self.prefixes("medium"), ["m-other", "m2"])
+        # large keeps 1: the other version is retired after ours is verified, not left unindexed
+        self.assertEqual(self.publish("large", "l1"), 0)
+        self.fake.on_first_part = sneak("large", "l-other")
+        self.assertEqual(self.publish("large", "l2"), 0, self.out)
+        self.assertEqual(self.versions("large"), ["l2"])
+        self.assertEqual(self.prefixes("large"), ["l2"])
 
     def test_keep_override(self):
         for v in ("v1", "v2", "v3"):

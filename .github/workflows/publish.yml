@@ -18,8 +18,8 @@
 #    There are no pull_request / pull_request_target / issue triggers, so forks never reach it.
 #  * Only the publish job uses the `gcs-publish` environment (required reviewer; deployment refs: main
 #    and v* tags). Only publish (for Cloud Build) and pages (for deploy-pages) may request an OIDC token.
-#  * The only secrets are R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_ACCOUNT_ID, read only by the publish
-#    job, and passed as env only to the two steps that call tools/publish_r2.py (the validation step sees
+#  * The only secrets are R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_ACCOUNT_ID (kept as gcs-publish
+#    environment secrets, so GitHub releases them only after the approval), read only by the publish job, passed as env only to the two steps that call tools/publish_r2.py (the validation step sees
 #    only whether each one is set). They never go to Cloud Build substitutions, outputs or summaries.
 #    Google access stays keyless: GitHub's OIDC token goes through Workload Identity Federation to
 #    impersonate kit-publisher, accepted only for this repository id and name, main or v* tags, and the
@@ -288,7 +288,7 @@ jobs:
           python3 -I tools/publish_r2.py --check-config --no-secrets
           for s in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
             eval "has=\${HAS_$s}"
-            [ "$has" = true ] || { echo "::error::the repository secret $s is empty or missing (Settings -> Secrets and variables -> Actions -> Secrets)"; exit 1; }
+            [ "$has" = true ] || { echo "::error::the secret $s is empty or missing. Add it as a gcs-publish environment secret (Settings -> Environments -> gcs-publish -> Environment secrets)"; exit 1; }
           done
           sh tools/ci_inputs.sh
           tier=$(sed -n 's/^tier=//p' "$GITHUB_OUTPUT"); version=$(sed -n 's/^version=//p' "$GITHUB_OUTPUT")

@@ -7,11 +7,16 @@ there before this change; see [Retiring the old GCS kits](#retiring-the-old-gcs-
 uploads kits to GCS and never deletes anything there.
 
 Credentials:
-* **R2:** an R2 API token (read/write on the kit bucket only). GitHub has it as three repository secrets
-  (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`), which only the `publish` job reads, and
-  only in the two steps that run `tools/publish_r2.py`. Cloud Build reads the same values from Secret
-  Manager. They are never Cloud Build substitutions, job outputs or summary text, and the publisher never
-  prints them or its signed request headers.
+* **R2:** an R2 API token with **Object Read & Write on the kit bucket only** (no account-wide R2 admin).
+  GitHub keeps it as three **`gcs-publish` environment secrets** (`R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`), so it is released only to the `publish` job, only after the
+  required approval, and only on `main` or a `v*` tag. Within that job only the two steps that run
+  `tools/publish_r2.py` get the values. Cloud Build reads the same values from Secret Manager. They are
+  never Cloud Build substitutions, job outputs or summary text, and the publisher never prints them or its
+  signed request headers.
+* **This is a deliberate exception** to the repository's otherwise keyless design ("WIF only, no stored
+  secrets"): R2 has no keyless federation for GitHub Actions or Google Cloud, so a scoped, stored token is the
+  only option. Keep it narrow (one bucket, object read/write) and rotate it if it might have leaked.
 * **Google:** no stored secrets. GitHub Actions proves who it is with a short-lived OIDC token, and Google
   accepts that token only for this repository, `main` or a `v*` tag, and jobs in the protected
   `gcs-publish` environment (Workload Identity Federation). It is now only needed to start Cloud Build for
@@ -92,8 +97,19 @@ At the end the script prints the exact `gh` commands for step 2, and the Secret 
 ## 2. One-time GitHub, Cloudflare R2 and Secret Manager setup
 
 Already done (don't redo): the R2 bucket (Standard class, public access on), an R2 API token with
-read/write on that bucket, the repository secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
-`R2_ACCOUNT_ID`, and Settings → Pages → Source = **GitHub Actions**.
+read/write on that bucket, the secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, and
+Settings → Pages → Source = **GitHub Actions**.
+
+**Move the three R2 secrets into the `gcs-publish` environment.** Repository secrets can be read by any
+workflow run that someone with write access pushes on any branch; environment secrets are released only to
+jobs that pass the environment's approval and branch/tag rules. The workflow code is the same either way
+(an environment secret overrides a repository secret of the same name):
+1. Settings → Environments → **gcs-publish** → *Environment secrets* → add `R2_ACCESS_KEY_ID`,
+   `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID` with the same values.
+2. Settings → Secrets and variables → Actions → *Repository secrets*: delete the three R2 ones.
+3. In the Cloudflare dashboard, check the token is **Object Read & Write**, limited to the kit bucket only
+   (not *Admin Read & Write*, not all buckets). If it is broader, make a new narrow one and replace the
+   values in GitHub and Secret Manager.
 
 1. **Environment `gcs-publish`.** In Settings → Environments → New environment:
    * *Required reviewers*: **Chris**. Every publish waits for this approval.
