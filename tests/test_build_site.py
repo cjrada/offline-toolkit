@@ -51,6 +51,16 @@ class Page(unittest.TestCase):
         self.assertNotIn("<b>", page)
         self.assertEqual(page.count("Not published yet."), 3)  # a medium entry under small is ignored too
 
+    def test_fetch_reads_the_tier_indexes(self):
+        docs = {f"{BASE}/small/index.json": {"versions": [entry("small", "v2")]},
+                f"{BASE}/large/index.json": {"versions": [entry("large", "l1")]}}
+        seen = []
+        idx = bs.fetch_index(BASE, fetch=lambda u: seen.append(u) or docs.get(u))
+        self.assertEqual(seen, [f"{BASE}/{t}/index.json" for t in ("small", "medium", "large")])
+        self.assertEqual([e["version"] for e in idx["tiers"]["small"]], ["v2"])
+        self.assertEqual(idx["tiers"]["medium"], [])
+        self.assertIsNone(bs.fetch_index(BASE, fetch=lambda u: None))
+
     def test_main_offline(self):
         d = tempfile.mkdtemp()
         idx = os.path.join(d, "index.json")

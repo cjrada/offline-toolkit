@@ -797,6 +797,14 @@ def main():
         got = check_pages(pages.replace(old_s, new_s))
         assert any(needle in p for p in got), f"pages.yml mutation {needle!r} not caught: {got}"
     problems += [f"(pages.yml) {p}" for p in pages_problems]
+    # Docs: the R2 secrets belong to the gcs-publish environment, never the repository.
+    root = WORKFLOW.parents[2]
+    for doc in ("docs/SETUP.md", "README.md", "scripts/setup-gcp.sh"):
+        t = (root / doc).read_text(encoding="utf-8")
+        if "gcs-publish" not in t or not re.search(r"gcs-publish(`)? environment( secrets|\s*\(Settings)", t):
+            problems.append(f"{doc} must say the R2 secrets are gcs-publish environment secrets")
+        if re.search(r"(?i)(set|add|store|keep)[^.\n]{0,40}repository secrets? `?R2_", t):
+            problems.append(f"{doc} must not tell anyone to store the R2 secrets as repository secrets")
     if problems:
         for p in problems:
             print(f"FAIL {WORKFLOW.relative_to(WORKFLOW.parents[2])}: {p}")

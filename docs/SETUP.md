@@ -322,8 +322,9 @@ Order, each step only after the previous one succeeded (`tools/publish_r2.py`):
 
 ### Downloads page (GitHub Pages)
 
-`.github/workflows/pages.yml` runs `tools/build_site.py`, which fetches `<R2_PUBLIC_URL>/index.json` over
-HTTPS (no credentials) and writes one plain HTML page: the latest kit of each tier with version, date,
+`.github/workflows/pages.yml` runs `tools/build_site.py`, which fetches the three
+`<R2_PUBLIC_URL>/<tier>/index.json` files over HTTPS (no credentials; they are the source of truth, so a
+small and a medium publish at the same time cannot hide one from the page) and writes one plain HTML page: the latest kit of each tier with version, date,
 size, sha256 and links to the zip and `.sha256`, the previous versions still kept, size warnings, and a link
 to this repository. publish-kit calls it after each real publish; run it by hand to rebuild the page.
 

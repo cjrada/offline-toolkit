@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build the public downloads page (GitHub Pages) from the R2 manifests. Python stdlib only, no credentials:
-the manifests and kits are public, so this only reads <public-url>/index.json over HTTPS.
+the manifests and kits are public, so this only reads <public-url>/<tier>/index.json over HTTPS. The three
+tier indexes are the source of truth (the top-level index.json is rebuilt from them on each publish, so two
+publishes of different tiers at once could leave it a step behind; the tier files cannot be).
 
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --out _site
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --index index.json --out _site   # offline
@@ -23,19 +25,29 @@ def public_base(url):
     return url if PUBLIC_URL_RE.fullmatch(url) else ""
 
 
-def fetch_index(base):
-    """The top-level index.json, or None if nothing has been published yet."""
-    req = urllib.request.Request(f"{base}/index.json?t={int(time.time())}", headers={"User-Agent": "offline-toolkit-site/1",
-                                                                                  "Cache-Control": "no-cache"})
+def fetch_json(url):
+    """Parsed JSON at url, or None on 404."""
+    req = urllib.request.Request(f"{url}?t={int(time.time())}", headers={"User-Agent": "offline-toolkit-site/1",
+                                                                      "Cache-Control": "no-cache"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             if not r.geturl().startswith("https://"):
-                raise SystemExit("index.json was redirected off https")
+                raise SystemExit(f"{url} was redirected off https")
             return json.loads(r.read(5_000_000))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
-        raise SystemExit(f"fetching {base}/index.json failed: HTTP {e.code}")
+        raise SystemExit(f"fetching {url} failed: HTTP {e.code}")
+
+
+def fetch_index(base, fetch=fetch_json):
+    """{"tiers": {tier: versions}} from the three <tier>/index.json files, or None if none exists yet."""
+    tiers, found = {}, False
+    for tier, _ in TIERS:
+        doc = fetch(f"{base}/{tier}/index.json")
+        found = found or doc is not None
+        tiers[tier] = (doc or {}).get("versions") or []
+    return {"tiers": tiers} if found else None
 
 
 def clean_entry(e, tier):

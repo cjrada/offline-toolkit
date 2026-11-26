@@ -274,6 +274,10 @@ class R2:
             h[f"x-amz-meta-{k}"] = v
         st, _, b = self.call("PUT", key, body=data, headers=h, what=f"uploading {key}")
         if st == 412:
+            # A retry after a lost response finds our own first attempt: same bytes means it is ours.
+            if self.get(key) == data:
+                log(f"  {key} was already written by an earlier attempt whose reply was lost (same bytes)")
+                return
             raise Fail(f"{key} already exists - versions are immutable; publish a new version")
         if st != 200:
             raise Fail(f"uploading {key} failed: {s3_error(st, b)}")
@@ -284,7 +288,26 @@ class R2:
         if st not in (200, 204, 404):
             raise Fail(f"deleting {key} failed: {s3_error(st, b)}")
 
-    def _complete(self, key, upload_id, body):
+    def _landed(self, key, size, sha):
+        """True if key already holds exactly this file (same Content-Length and sha256 metadata)."""
+        try:
+            hd = self.head(key)
+        except Fail:
+            return False
+        return hd is not None and str(hget(hd, "Content-Length")) == str(size) and hget(hd, "x-amz-meta-sha256") == sha
+
+    def _complete(self, key, upload_id, body, size=None, sha=None):
+        try:
+            self._complete_once(key, upload_id, body)
+        except Fail:
+            # A completion whose reply was lost retries into 412 (our object now exists) or 404 NoSuchUpload.
+            # If the object is exactly ours, the publish went through: carry on instead of failing a good upload.
+            if sha and self._landed(key, size, sha):
+                log(f"  {key} was completed by an earlier attempt whose reply was lost (same size and sha256)")
+                return
+            raise
+
+    def _complete_once(self, key, upload_id, body):
         """CompleteMultipartUpload, create-only: the key is checked just before, and the request carries
         If-None-Match: * so the store itself refuses to replace an object that appeared in between (S3 and moto
         honour it). If the store answers that it does not implement the header, the HEAD check alone stands
@@ -360,7 +383,7 @@ class R2:
             body = ("<CompleteMultipartUpload>" + "".join(
                 f"<Part><PartNumber>{n}</PartNumber><ETag>{etags[n]}</ETag></Part>" for n in sorted(etags))
                 + "</CompleteMultipartUpload>").encode()
-            self._complete(key, upload_id, body)
+            self._complete(key, upload_id, body, size, meta.get("sha256"))
         except BaseException:
             try:
                 self.send("DELETE", key, query={"uploadId": upload_id})

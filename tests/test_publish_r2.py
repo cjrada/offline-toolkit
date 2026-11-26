@@ -48,13 +48,23 @@ class FakeS3:
         assert headers["x-amz-content-sha256"] == hashlib.sha256(data).hexdigest(), "payload hash not signed"
         if "content-md5" in headers:
             assert headers["content-md5"] == base64.b64encode(hashlib.md5(data).digest()).decode()
+        lost = False
         with self.lock:
             for i, (m, pat, resp) in enumerate(self.fail):
                 if m == method and re.search(pat, url):
                     self.fail.pop(i)
                     if resp == "drop":
                         raise OSError("connection reset")
+                    if resp == "lost":  # the request is applied, then the reply never arrives
+                        lost = True
+                        break
                     return self._err(resp, "InternalError" if resp >= 500 else "AccessDenied")
+        result = self._handle(method, url, key, qs, data, headers, body)
+        if lost:
+            raise OSError("reply lost")
+        return result
+
+    def _handle(self, method, url, key, qs, data, headers, body):
         if method == "GET" and not key:
             return self._list(qs)
         if method == "GET":
@@ -99,6 +109,8 @@ class FakeS3:
                     return self._err(501, "NotImplemented")
                 if key in self.objects:
                     return self._err(412, "PreconditionFailed")
+            if qs["uploadId"] not in self.uploads:
+                return self._err(404, "NoSuchUpload")
             up = self.uploads.pop(qs["uploadId"])
             nums = [int(n) for n in re.findall(rb"<PartNumber>(\d+)</PartNumber>", data)]
             assert nums == sorted(up["parts"]), (nums, sorted(up["parts"]))
@@ -349,6 +361,27 @@ class Publish(Base):
         self.assertEqual(self.publish("small", "v2"), 0, self.out)
         self.assertIn("does not accept If-None-Match on CompleteMultipartUpload", self.out)
         self.assertEqual(self.versions("small"), ["v2", "v1"])
+
+    def test_lost_replies_do_not_fail_a_good_publish(self):
+        for pat in (r"\.zip\.sha256$", r"KIT-INFO\.json$", r"/small/index\.json$", r"\.zip\?uploadId="):
+            with self.subTest(lost=pat):
+                self.fake = FakeS3()
+                method = "POST" if "uploadId" in pat else "PUT"
+                self.fake.fail = [(method, pat, "lost")]
+                self.assertEqual(self.publish("small", "v1"), 0, self.out)
+                self.assertEqual(self.fake.fail, [])
+                if "index" not in pat:  # manifests are plain overwrites: a retry just writes them again
+                    self.assertIn("earlier attempt whose reply was lost", self.out)
+                self.assertEqual(self.versions("small"), ["v1"])
+                self.assertEqual(self.fake.aborts, [])
+
+    def test_retry_conflict_with_other_bytes_still_fails(self):
+        def other(fake):
+            fake.objects["small/v1/KIT-INFO.json"] = {"data": b"someone else's", "meta": {}, "ctype": "", "cc": None}
+        self.fake.on_first_part = other
+        self.assertEqual(self.publish("small", "v1"), 1)
+        self.assertIn("small/v1/KIT-INFO.json already exists", self.out)
+        self.assertNotIn("small/latest.json", self.fake.objects)
 
     def test_part_retries(self):
         self.fake.fail = [("PUT", r"partNumber=2&", 503), ("PUT", r"partNumber=3&", "drop"), ("PUT", r"partNumber=2&", 500)]

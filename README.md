@@ -24,7 +24,9 @@ compare it with the first word of the `.sha256` file.
 
 The same files are listed by machine-readable manifests next to them on R2: `latest.json` (newest of each
 tier), `index.json` (every kept version), and `<tier>/latest.json` / `<tier>/index.json`. How kits are
-built and published: [docs/SETUP.md](docs/SETUP.md).
+built and published: [docs/SETUP.md](docs/SETUP.md). (Publishing needs an R2 token, kept only as
+`gcs-publish` environment secrets so it is released only behind that environment's approval on `main` or
+a `v*` tag; it is never a repository secret.)
 
 1. **Format the drive exFAT.** FAT32 cannot hold files over 4 GB (models and ZIMs are bigger), and NTFS is
    awkward on some Linux systems. Windows: right-click the drive → Format → exFAT. Linux: `sudo mkfs.exfat -n KIT /dev/sdX1`.
