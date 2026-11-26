@@ -13,10 +13,13 @@ permissions: {}
 jobs:
   deploy:
     name: "pages · build and deploy the downloads page"
-    # Manual runs: main only. When publish-kit calls it, github.ref is publish-kit's (main or a v* tag push).
+    # Manual runs (workflow_dispatch): main only, never a branch or a tag. When publish-kit calls it
+    # (workflow_call), github.ref is publish-kit's: main, or refs/tags/v* after a tag publish. In a called
+    # workflow github.event_name is workflow_call, not push, so the tag case must not test for push.
+    # (Tag deploys also need a v* deployment rule on the github-pages environment; docs/SETUP.md.)
     if: >-
       github.repository == 'cjrada/offline-toolkit' &&
-      (github.ref == 'refs/heads/main' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+      (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

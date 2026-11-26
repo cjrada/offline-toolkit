@@ -421,6 +421,8 @@ def check_gating_and_visibility(text):
     for name in sorted(R2_SECRETS):
         if cenv.get(f"HAS_{name}") != f"${{{{ secrets.{name} != '' }}}}":
             problems.append(f"cfg step must check that secret {name} is set (HAS_{name})")
+    if "gcs-publish environment secret" not in crun or "repository secret" in crun:
+        problems.append("cfg step must tell Chris to keep the R2 secrets in the gcs-publish environment, not the repository")
     if "for v in GCS_BUCKET GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT" not in crun:
         problems.append("cfg step must still require the gcs-publish variables")
     chk = steps.get("check") or {}
@@ -493,6 +495,93 @@ def check_gating_and_visibility(text):
     return problems
 
 
+# ---------------- a tiny evaluator for GitHub `if:` expressions (the subset these workflows use) ----------------
+TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\)|,)|'((?:[^']|'')*)'|([A-Za-z_][A-Za-z0-9_.-]*))")
+
+
+def eval_if(expr, ctx):
+    """Evaluate expr with ctx {"github.ref": ..., ...}. Supports ||, &&, !, ==, !=, parentheses, string
+    literals, context names and startsWith(a, b). Raises ValueError on anything else."""
+    toks, pos, expr = [], 0, expr.strip()
+    while pos < len(expr):
+        m = TOKEN.match(expr, pos)
+        if not m or m.end() == pos:
+            raise ValueError(f"cannot read {expr[pos:]!r}")
+        op, lit, name = m.groups()
+        toks.append(("op", op) if op else ("str", lit.replace("''", "'")) if lit is not None else ("name", name))
+        pos = m.end()
+    i = 0
+
+    def peek():
+        return toks[i] if i < len(toks) else (None, None)
+
+    def take(kind=None, val=None):
+        nonlocal i
+        t = peek()
+        if (kind and t[0] != kind) or (val and t[1] != val):
+            raise ValueError(f"expected {val or kind}, got {t}")
+        i += 1
+        return t
+
+    def orx():
+        v = andx()
+        while peek() == ("op", "||"):
+            take(); w = andx(); v = v or w
+        return v
+
+    def andx():
+        v = cmp()
+        while peek() == ("op", "&&"):
+            take(); w = cmp(); v = v and w
+        return v
+
+    def cmp():
+        v = unary()
+        if peek() in (("op", "=="), ("op", "!=")):
+            op = take()[1]; w = unary()
+            return (v == w) if op == "==" else (v != w)
+        return v
+
+    def unary():
+        if peek() == ("op", "!"):
+            take(); return not unary()
+        if peek() == ("op", "("):
+            take(); v = orx(); take("op", ")"); return v
+        kind, val = take()
+        if kind == "str":
+            return val
+        if kind == "name" and peek() == ("op", "("):
+            take(); a = orx(); take("op", ","); b = orx(); take("op", ")")
+            if val != "startsWith":
+                raise ValueError(f"unsupported function {val}")
+            return str(a).lower().startswith(str(b).lower())
+        if kind == "name":
+            if val not in ctx:
+                raise ValueError(f"unknown name {val}")
+            return ctx[val]
+        raise ValueError(f"unexpected {val}")
+
+    v = orx()
+    if i != len(toks):
+        raise ValueError(f"trailing {toks[i:]}")
+    return v
+
+
+# (event as the called workflow sees it, ref, should deploy). A called workflow's github context is the
+# caller's, so after a tag publish event_name may read push (GitHub's docs) or workflow_call; accept both.
+PAGES_CASES = [
+    ("workflow_dispatch", "refs/heads/main", True),
+    ("workflow_dispatch", "refs/tags/v1.0.0", False),
+    ("workflow_dispatch", "refs/heads/feature", False),
+    ("workflow_call", "refs/heads/main", True),
+    ("workflow_call", "refs/tags/v1.0.0", True),
+    ("push", "refs/tags/v1.0.0", True),
+    ("workflow_call", "refs/heads/feature", False),
+    ("workflow_call", "refs/tags/x1", False),
+    ("push", "refs/heads/feature", False),
+]
+
+
 def check_pages(text):
     """Static checks for .github/workflows/pages.yml."""
     try:
@@ -518,8 +607,18 @@ def check_pages(text):
     if not (isinstance(conc, dict) and conc.get("group") == "pages-deploy" and is_false(conc.get("cancel-in-progress"))):
         problems.append(f"pages deploy needs its own concurrency group (pages-deploy, no cancel), got {conc!r}")
     c = norm(job.get("if"))
-    if "github.repository == 'cjrada/offline-toolkit'" not in c or "github.ref == 'refs/heads/main'" not in c:
-        problems.append(f"pages deploy must be limited to this repository and main, got {c!r}")
+    if "github.event_name == 'push'" in c:
+        problems.append("pages deploy must not require event_name == 'push': pages.yml never runs on push, so a "
+                        "tag publish (workflow_call) would be skipped")
+    try:
+        for event, ref, want in PAGES_CASES:
+            for repo, ok in (("cjrada/offline-toolkit", want), ("someone/fork", False)):
+                got = eval_if(c, {"github.repository": repo, "github.ref": ref, "github.event_name": event})
+                if bool(got) != ok:
+                    problems.append(f"pages deploy if: gives {bool(got)} for {event} on {ref} in {repo}, expected {ok} "
+                                    "(manual runs: main only; publish-kit's call: main and v* tags; this repo only)")
+    except ValueError as e:
+        problems.append(f"pages deploy if: cannot be evaluated ({e}): {c!r}")
     used = [str(st.get("uses", "")).split("@")[0] for st in job.get("steps") or [] if isinstance(st, dict) and "uses" in st]
     if used != ["actions/checkout", "actions/upload-pages-artifact", "actions/deploy-pages"]:
         problems.append(f"pages deploy must use checkout, upload-pages-artifact, deploy-pages, got {used}")
@@ -683,7 +782,17 @@ def main():
             ("      group: pages-deploy\n", "      group: other\n", "concurrency"),
             ("          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n", "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n", "secrets"),
             ("@368f82528645a54fb793d4d04e342629a3f51346", "@v5", "full commit SHA"),
-            ("    if: >-\n      github.repository == 'cjrada/offline-toolkit' &&\n", "    if: >-\n", "limited")):
+            ("    if: >-\n      github.repository == 'cjrada/offline-toolkit' &&\n", "    if: >-\n", "someone/fork"),
+            # the dead tag clause this replaces: requires push, which a called workflow may not see
+            ("(startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch')",
+             "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))", "event_name == 'push'"),
+            # tag clause dropped: a v* tag publish would not update the page
+            (" || (startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch')", "",
+             "workflow_call on refs/tags/v1.0.0"),
+            # manual runs from a tag allowed
+            (" && github.event_name != 'workflow_dispatch'", "", "workflow_dispatch on refs/tags/v1.0.0"),
+            # any branch allowed
+            ("github.ref == 'refs/heads/main' ||", "startsWith(github.ref, 'refs/heads/') ||", "refs/heads/feature")):
         assert pages.count(old_s) == 1, f"pages.yml: {old_s!r}"
         got = check_pages(pages.replace(old_s, new_s))
         assert any(needle in p for p in got), f"pages.yml mutation {needle!r} not caught: {got}"
