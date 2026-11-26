@@ -22,7 +22,15 @@
 #  * Inputs reach the shell only through env and are validated against strict patterns
 #    (tools/ci_inputs.sh); the publish job re-validates everything the build job hands it.
 #  * Actions and container images are pinned to full SHAs/digests.
+#
+# Visibility: run-name puts tier, version and dry run / publish in the Actions run list; the job names
+# say what each job does; every job writes a $GITHUB_STEP_SUMMARY section; and the `summary` job runs
+# last with if: always() (no environment, no permissions, no checkout) to report the inputs, each job's
+# result and the outcome in one place, including why jobs were skipped on refs other than main / v*.
 name: publish-kit
+# Tag pushes have no inputs: they always publish the small tier, versioned by the tag name. The default
+# workflow_dispatch version (yyyymmdd-<commit>) cannot be computed here; the summary shows the resolved one.
+run-name: "publish-kit · ${{ inputs.tier || 'small' }} · ${{ inputs.version || (github.event_name == 'push' && github.ref_name) || 'auto version' }} · ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'dry run' || 'publish' }}${{ (github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')) && format(' · {0} (not main or v* tag, skipped)', github.ref_name) || '' }}"
 on:
   push:
     tags: ['v*']
@@ -48,6 +56,7 @@ concurrency:
 jobs:
   # ---------------- small: build with no cloud access ----------------
   build:
+    name: "build · small kit on a GitHub runner (no cloud access)"
     if: >-
       github.repository == 'cjrada/offline-toolkit' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
@@ -62,6 +71,7 @@ jobs:
       dry_run: ${{ steps.cfg.outputs.dry_run }}
       zip_name: ${{ steps.hash.outputs.zip_name }}
       sha256: ${{ steps.hash.outputs.sha256 }}
+      size: ${{ steps.hash.outputs.size }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,6 +113,7 @@ jobs:
           go version
 
       - name: Build small kit
+        id: kit
         env:
           VERSION: ${{ steps.cfg.outputs.version }}
           # The runner's Go is older than go-pmtiles needs. Pin the toolchain go fetches (checksum-verified
@@ -115,6 +126,7 @@ jobs:
           ls -la "$WORK"
 
       - name: Check publishability (no upload)
+        id: check
         env:
           VERSION: ${{ steps.cfg.outputs.version }}
         # The bucket name is an environment variable of gcs-publish, which this job deliberately cannot
@@ -128,8 +140,9 @@ jobs:
         run: |
           name="offline-toolkit-small-$VERSION.zip"
           sha=$(sha256sum "$WORK/$name" | cut -d' ' -f1)
-          echo "sha256 $sha  $name"
-          { echo "zip_name=$name"; echo "zip_path=$WORK/$name"; echo "sha256=$sha"; } >> "$GITHUB_OUTPUT"
+          size=$(stat -c %s "$WORK/$name")
+          echo "sha256 $sha  $name ($size bytes)"
+          { echo "zip_name=$name"; echo "zip_path=$WORK/$name"; echo "sha256=$sha"; echo "size=$size"; } >> "$GITHUB_OUTPUT"
 
       - name: Hand the zip to the publish job
         id: upload
@@ -140,8 +153,69 @@ jobs:
           if-no-files-found: error
           retention-days: 1       # the minimum; approve the publish job within a day or re-run the workflow
 
+      - name: Job summary
+        if: always()
+        env:
+          IN_TIER: ${{ inputs.tier }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          TIER: ${{ steps.cfg.outputs.tier }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          DRY_RUN: ${{ steps.cfg.outputs.dry_run }}
+          ZIP_NAME: ${{ steps.hash.outputs.zip_name }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
+          SIZE: ${{ steps.hash.outputs.size }}
+          S_CFG: ${{ steps.cfg.outcome }}
+          S_KIT: ${{ steps.kit.outcome }}
+          S_CHECK: ${{ steps.check.outcome }}
+          S_HASH: ${{ steps.hash.outcome }}
+          S_UPLOAD: ${{ steps.upload.outcome }}
+        run: |
+          clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._/+-'; }
+          ver=$(clean "$VERSION"); [ -n "$ver" ] || ver="not resolved (input: '$(clean "$IN_VERSION")'; default: tag name on a tag push, else yyyymmdd-<commit>)"
+          dry=$DRY_RUN; [ -n "$dry" ] || { [ "$EVENT" = workflow_dispatch ] && [ "$IN_DRY_RUN" = true ] && dry=true || dry=false; }
+          {
+            echo "## build · small kit on a GitHub runner"
+            echo
+            echo "| input | value |"
+            echo "|---|---|"
+            echo "| tier | \`$(clean "${TIER:-${IN_TIER:-small}}")\` |"
+            echo "| version | \`$ver\` |"
+            echo "| dry_run | \`$dry\` |"
+            echo "| event | \`$(clean "$EVENT")\` |"
+            echo "| ref | \`$(clean "$REF")\` |"
+            echo "| commit | \`$(clean "$SHA")\` |"
+            echo
+            echo "| step | outcome |"
+            echo "|---|---|"
+            echo "| validate inputs and manifest pins | ${S_CFG:-not run} |"
+            echo "| build the small kit (--frozen) | ${S_KIT:-not run} |"
+            echo "| publishability check (no upload) | ${S_CHECK:-not run} |"
+            echo "| hash the zip | ${S_HASH:-not run} |"
+            echo "| hand the zip to the publish job (1-day artifact) | ${S_UPLOAD:-not run} |"
+            echo
+            if [ -n "$ZIP_NAME" ]; then
+              echo "**Kit**"
+              echo
+              echo "* zip: \`$(clean "$ZIP_NAME")\`"
+              [ -n "$SIZE" ] && echo "* size: $(awk -v b="$(clean "$SIZE")" 'BEGIN { printf "%.2f GB (%d bytes)", b / 1e9, b }')"
+              [ -n "$SHA256" ] && echo "* sha256: \`$(clean "$SHA256")\`"
+              echo
+            fi
+            echo "This job has no Google credentials and never uploads. The \`publish\` job (gcs-publish approval)"
+            if [ "$dry" = true ]; then
+              echo "re-verifies the zip; this is a **dry run**, so it does **not** upload."
+            else
+              echo "re-verifies the zip and uploads it."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ---------------- credentials: publish small, or run Cloud Build for medium/large ----------------
   publish:
+    name: "publish · ${{ inputs.tier || 'small' }} · ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && ((inputs.tier || 'small') == 'small' && 'dry run, verify zip, no upload' || 'dry run, validate inputs and pins only, no Cloud Build') || ((inputs.tier || 'small') == 'small' && 'upload to GCS' || 'build and publish on Cloud Build') }}"
     needs: build
     if: >-
       !cancelled() &&
@@ -155,6 +229,25 @@ jobs:
     permissions:
       contents: read
       id-token: write  # lets the auth step ask GitHub for an OIDC token; nothing else
+    # Read by the summary job. All values are validated or derived from validated values; no tokens.
+    outputs:
+      tier: ${{ steps.cfg.outputs.tier }}
+      version: ${{ steps.cfg.outputs.version }}
+      dry_run: ${{ steps.cfg.outputs.dry_run }}
+      published: ${{ steps.result.outputs.published }}
+      zip_name: ${{ steps.result.outputs.zip_name }}
+      sha256: ${{ steps.result.outputs.sha256 }}
+      size: ${{ steps.result.outputs.size }}
+      gs_uri: ${{ steps.result.outputs.gs_uri }}
+      folder_url: ${{ steps.result.outputs.folder_url }}
+      zip_url: ${{ steps.result.outputs.zip_url }}
+      zip_browser_url: ${{ steps.result.outputs.zip_browser_url }}
+      sha256_url: ${{ steps.result.outputs.sha256_url }}
+      kit_info_url: ${{ steps.result.outputs.kit_info_url }}
+      latest_url: ${{ steps.result.outputs.latest_url }}
+      cloud_build_id: ${{ steps.cloudbuild.outputs.id }}
+      cloud_build_url: ${{ steps.cloudbuild.outputs.url }}
+      cloud_build_status: ${{ steps.cbwait.outputs.status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,6 +303,7 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Download kit zip from the build job
+        id: download
         if: steps.cfg.outputs.tier == 'small'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -246,6 +340,7 @@ jobs:
           echo "path=$DIR/$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Check publishability (no upload)
+        id: check
         if: steps.cfg.outputs.tier == 'small'
         env:
           ZIP: ${{ steps.zip.outputs.path }}
@@ -254,26 +349,32 @@ jobs:
 
       # ---------------- Google credentials only from here on ----------------
       - name: Authenticate to Google Cloud (keyless)
-        if: steps.cfg.outputs.dry_run != 'true'
+        id: auth
+        if: success() && steps.cfg.outputs.dry_run != 'true'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        if: steps.cfg.outputs.dry_run != 'true'
+        id: gcloud
+        if: success() && steps.cfg.outputs.dry_run != 'true'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Publish small kit to GCS
-        if: steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
+        id: upload
+        if: success() && steps.cfg.outputs.tier == 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
           ZIP: ${{ steps.zip.outputs.path }}
           GCS_BUCKET: ${{ vars.GCS_BUCKET }}
         run: python3 tools/publish_gcs.py --zip "$ZIP" --bucket "$GCS_BUCKET" --auth gcloud
 
       # ---------------- medium / large: Cloud Build ----------------
-      - name: Build and publish ${{ steps.cfg.outputs.tier }} kit on Cloud Build
-        if: steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
+      # Submitting and waiting are separate steps so the build id and console link are recorded (step
+      # output, notice annotation) as soon as the build exists, even if the wait later fails or times out.
+      - name: Submit ${{ steps.cfg.outputs.tier }} kit to Cloud Build
+        id: cloudbuild
+        if: success() && steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
         env:
           TIER: ${{ steps.cfg.outputs.tier }}
           VERSION: ${{ steps.cfg.outputs.version }}
@@ -282,28 +383,306 @@ jobs:
           GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
           project="${GCP_SERVICE_ACCOUNT#*@}"; project="${project%.iam.gserviceaccount.com}"
+          # Check the project before submitting, so nothing after the submit can fail and lose the build id.
+          echo "$project" | grep -Eqx '[a-z][a-z0-9-]{4,61}[a-z0-9]' || { echo "::error::cannot derive the project from GCP_SERVICE_ACCOUNT"; exit 1; }
           id=$(gcloud builds submit --project "$project" --no-source --config cloudbuild.yaml --async --format='value(id)' \
                  --substitutions "_TIER=$TIER,_VERSION=$VERSION,_COMMIT=$COMMIT,_BUCKET=$GCS_BUCKET")
-          echo "Cloud Build $id started"
+          echo "$id" | grep -Eqx '[0-9A-Za-z-]{1,64}' || { echo "::error::unexpected Cloud Build id from gcloud"; exit 1; }
+          url="https://console.cloud.google.com/cloud-build/builds/$id?project=$project"
+          { echo "id=$id"; echo "project=$project"; echo "url=$url"; } >> "$GITHUB_OUTPUT"
+          echo "Cloud Build $id started: $url"
+          echo "::notice title=Cloud Build started for $TIER $VERSION::Cloud Build $id - $url"
+
+      - name: Wait for Cloud Build ${{ steps.cloudbuild.outputs.id }}
+        id: cbwait
+        if: success() && steps.cfg.outputs.tier != 'small' && steps.cfg.outputs.dry_run != 'true'
+        env:
+          ID: ${{ steps.cloudbuild.outputs.id }}
+          PROJECT: ${{ steps.cloudbuild.outputs.project }}
+        run: |
           # The build keeps going if this job stops; a failed status query (e.g. a transient API error after
           # hours) must not fail the job, so only a final status ends the loop.
           deadline=$(( $(date +%s) + 350 * 60 )); last=""
           while :; do
-            status=$(gcloud builds describe "$id" --project "$project" --format='value(status)' 2>/dev/null) || status=UNKNOWN
-            [ "$status" = "$last" ] || { echo "$(date -u +%H:%M:%S) Cloud Build $id: $status"; last=$status; }
+            status=$(gcloud builds describe "$ID" --project "$PROJECT" --format='value(status)' 2>/dev/null) || status=UNKNOWN
+            [ "$status" = "$last" ] || { echo "$(date -u +%H:%M:%S) Cloud Build $ID: $status"; last=$status; echo "status=$status" >> "$GITHUB_OUTPUT"; }
             case "$status" in
-              SUCCESS) echo "Cloud Build $id succeeded"; break ;;
-              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) echo "::error::Cloud Build $id ended with $status"; exit 1 ;;
+              SUCCESS) echo "Cloud Build $ID succeeded"; break ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) echo "::error::Cloud Build $ID ended with $status"; exit 1 ;;
             esac
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::stopped waiting after 350 minutes; Cloud Build $id is still running on its own. Check it with: gcloud builds describe $id --project $project"
+              echo "status=STILL_RUNNING" >> "$GITHUB_OUTPUT"
+              echo "::error::stopped waiting after 350 minutes; Cloud Build $ID is still running on its own. Check it with: gcloud builds describe $ID --project $PROJECT"
               exit 1
             fi
             sleep 60
           done
+
+      # success(): only after the upload (small) or the Cloud Build wait (medium/large) succeeded. Writes links only.
+      - name: Record published kit
+        id: result
+        if: success() && steps.cfg.outputs.dry_run != 'true'
+        env:
+          TIER: ${{ steps.cfg.outputs.tier }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          BUILD_SHA256: ${{ needs.build.outputs.sha256 }}
+          BUILD_SIZE: ${{ needs.build.outputs.size }}
+        run: |
+          zip="offline-toolkit-$TIER-$VERSION.zip"; dir="kits/$TIER/$VERSION"
+          sha=$BUILD_SHA256; size=$BUILD_SIZE
+          if [ "$TIER" != small ]; then
+            # Best effort: the publisher may read latest.json (and only that); use it if it is this version.
+            got=$(gcloud storage cat "gs://$GCS_BUCKET/kits/$TIER/latest.json" 2>/dev/null | python3 -I -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          if d.get("version") == sys.argv[1]:
+              print(d.get("sha256", ""), d.get("size", ""))' "$VERSION" 2>/dev/null) || got=""
+            sha=${got% *}; size=${got#* }
+          fi
+          echo "$sha" | grep -Eqx '[0-9a-f]{64}' || sha=""
+          echo "$size" | grep -Eqx '[0-9]{1,20}' || size=""
+          console="https://console.cloud.google.com/storage/browser/_details/$GCS_BUCKET"
+          {
+            echo "published=true"; echo "zip_name=$zip"; echo "sha256=$sha"; echo "size=$size"
+            echo "gs_uri=gs://$GCS_BUCKET/$dir/$zip"
+            echo "folder_url=https://console.cloud.google.com/storage/browser/$GCS_BUCKET/$dir"
+            echo "zip_url=$console/$dir/$zip"
+            echo "zip_browser_url=https://storage.cloud.google.com/$GCS_BUCKET/$dir/$zip"
+            echo "sha256_url=$console/$dir/$zip.sha256"
+            echo "kit_info_url=$console/$dir/KIT-INFO.json"
+            echo "latest_url=$console/kits/$TIER/latest.json"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice title=Published $TIER kit $VERSION (private bucket - sign in to Google to download)::gs://$GCS_BUCKET/$dir/$zip - $console/$dir/$zip"
 
       - name: Dry run summary
         if: steps.cfg.outputs.dry_run == 'true'
         env:
           TIER: ${{ steps.cfg.outputs.tier }}
         run: echo "Dry run for $TIER - nothing uploaded. Medium/large dry runs only validate inputs and pins."
+
+      - name: Job summary
+        if: always()
+        env:
+          IN_TIER: ${{ inputs.tier }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          TIER: ${{ steps.cfg.outputs.tier }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          DRY_RUN: ${{ steps.cfg.outputs.dry_run }}
+          ZIP_NAME: ${{ steps.result.outputs.zip_name || needs.build.outputs.zip_name }}
+          SHA256: ${{ steps.result.outputs.sha256 || needs.build.outputs.sha256 }}
+          SIZE: ${{ steps.result.outputs.size || needs.build.outputs.size }}
+          GS_URI: ${{ steps.result.outputs.gs_uri }}
+          FOLDER_URL: ${{ steps.result.outputs.folder_url }}
+          ZIP_URL: ${{ steps.result.outputs.zip_url }}
+          ZIP_BROWSER_URL: ${{ steps.result.outputs.zip_browser_url }}
+          SHA256_URL: ${{ steps.result.outputs.sha256_url }}
+          KIT_INFO_URL: ${{ steps.result.outputs.kit_info_url }}
+          LATEST_URL: ${{ steps.result.outputs.latest_url }}
+          CB_ID: ${{ steps.cloudbuild.outputs.id }}
+          CB_URL: ${{ steps.cloudbuild.outputs.url }}
+          CB_STATUS: ${{ steps.cbwait.outputs.status }}
+          S_CFG: ${{ steps.cfg.outcome }}
+          S_DOWNLOAD: ${{ steps.download.outcome }}
+          S_VERIFY: ${{ steps.zip.outcome }}
+          S_CHECK: ${{ steps.check.outcome }}
+          S_AUTH: ${{ steps.auth.outcome }}
+          S_UPLOAD: ${{ steps.upload.outcome }}
+          S_CB: ${{ steps.cloudbuild.outcome }}
+          S_CBWAIT: ${{ steps.cbwait.outcome }}
+        run: |
+          clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._/+-'; }
+          tier=$(clean "${TIER:-${IN_TIER:-small}}")
+          ver=$(clean "$VERSION"); [ -n "$ver" ] || ver="not resolved (input: '$(clean "$IN_VERSION")'; default: tag name on a tag push, else yyyymmdd-<commit>)"
+          dry=$DRY_RUN; [ -n "$dry" ] || { [ "$EVENT" = workflow_dispatch ] && [ "$IN_DRY_RUN" = true ] && dry=true || dry=false; }
+          row() { [ -n "$2" ] && [ "$2" != skipped ] && echo "| $1 | $2 |"; return 0; }
+          {
+            if [ "$dry" = true ]; then echo "## publish · $tier · dry run"; else echo "## publish · $tier · publish"; fi
+            echo
+            echo "| input | value |"
+            echo "|---|---|"
+            echo "| tier | \`$tier\` |"
+            echo "| version | \`$ver\` |"
+            echo "| dry_run | \`$dry\` |"
+            echo "| event | \`$(clean "$EVENT")\` |"
+            echo "| ref | \`$(clean "$REF")\` |"
+            echo "| commit | \`$(clean "$SHA")\` |"
+            echo
+            echo "| step | outcome |"
+            echo "|---|---|"
+            row "validate inputs, manifest pins and gcs-publish configuration" "${S_CFG:-not run}"
+            row "download the build job's zip" "$S_DOWNLOAD"
+            row "verify sha256 and KIT-INFO.json" "$S_VERIFY"
+            row "publishability check with the real bucket (no upload)" "$S_CHECK"
+            row "authenticate to Google Cloud (keyless)" "$S_AUTH"
+            row "upload small kit to GCS" "$S_UPLOAD"
+            row "submit to Cloud Build" "$S_CB"
+            row "wait for Cloud Build" "$S_CBWAIT${CB_STATUS:+ ($(clean "$CB_STATUS"))}"
+            echo
+            if [ "$dry" = true ] && [ "$tier" = small ]; then
+              echo "**Dry run:** the small kit was built by the \`build\` job and verified and checked here. **Nothing was uploaded.**"
+            elif [ "$dry" = true ]; then
+              echo "**Dry run:** for $tier this only validates the inputs, the manifest pins and the gcs-publish configuration."
+              echo "**Cloud Build was not started; no kit was built and nothing was uploaded.** Untick dry_run to build and publish."
+            fi
+            if [ -n "$ZIP_NAME" ]; then
+              echo
+              echo "**Kit**"
+              echo
+              echo "* zip: \`$(clean "$ZIP_NAME")\`"
+              [ -n "$SIZE" ] && echo "* size: $(awk -v b="$(clean "$SIZE")" 'BEGIN { printf "%.2f GB (%d bytes)", b / 1e9, b }')"
+              [ -n "$SHA256" ] && echo "* sha256: \`$(clean "$SHA256")\`"
+            fi
+            if [ -n "$CB_ID" ]; then
+              echo
+              echo "**Cloud Build:** [\`$(clean "$CB_ID")\`]($CB_URL) status: ${CB_STATUS:-unknown}"
+              [ "$CB_STATUS" = SUCCESS ] || echo "  The build runs on its own even if this job stopped waiting; check the link above."
+            fi
+            if [ -n "$GS_URI" ]; then
+              echo
+              echo "### Published"
+              echo
+              echo "\`$GS_URI\`"
+              echo
+              echo "The bucket is **private**: these links need a Google account with access to it."
+              echo "Unauthenticated storage.googleapis.com URLs do not work."
+              echo
+              echo "* zip: [console]($ZIP_URL) · [download (signed-in browser)]($ZIP_BROWSER_URL)"
+              echo "* [sha256 sidecar]($SHA256_URL)"
+              echo "* [KIT-INFO.json]($KIT_INFO_URL)"
+              echo "* [latest.json]($LATEST_URL) (kits/$tier/latest.json now points at this version)"
+              echo "* [version folder]($FOLDER_URL)"
+            elif [ "$dry" != true ]; then
+              echo
+              echo "**Nothing was published** by this job (see the step outcomes above)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------- one overall report, whatever happened above ----------------
+  # Runs even when build/publish were skipped (refs other than main / v*), failed or were cancelled.
+  # No environment, no permissions, no secrets, no checkout: only job outputs and the github context.
+  summary:
+    name: "summary · ${{ inputs.tier || 'small' }} · ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'dry run' || 'publish' }}"
+    needs: [build, publish]
+    if: always() && github.repository == 'cjrada/offline-toolkit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Run summary
+        env:
+          IN_TIER: ${{ inputs.tier }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          TIER: ${{ needs.publish.outputs.tier || needs.build.outputs.tier }}
+          VERSION: ${{ needs.publish.outputs.version || needs.build.outputs.version }}
+          DRY_RUN: ${{ needs.publish.outputs.dry_run || needs.build.outputs.dry_run }}
+          ZIP_NAME: ${{ needs.publish.outputs.zip_name || needs.build.outputs.zip_name }}
+          SHA256: ${{ needs.publish.outputs.sha256 || needs.build.outputs.sha256 }}
+          SIZE: ${{ needs.publish.outputs.size || needs.build.outputs.size }}
+          PUBLISHED: ${{ needs.publish.outputs.published }}
+          GS_URI: ${{ needs.publish.outputs.gs_uri }}
+          FOLDER_URL: ${{ needs.publish.outputs.folder_url }}
+          ZIP_URL: ${{ needs.publish.outputs.zip_url }}
+          ZIP_BROWSER_URL: ${{ needs.publish.outputs.zip_browser_url }}
+          SHA256_URL: ${{ needs.publish.outputs.sha256_url }}
+          KIT_INFO_URL: ${{ needs.publish.outputs.kit_info_url }}
+          LATEST_URL: ${{ needs.publish.outputs.latest_url }}
+          CB_ID: ${{ needs.publish.outputs.cloud_build_id }}
+          CB_URL: ${{ needs.publish.outputs.cloud_build_url }}
+          CB_STATUS: ${{ needs.publish.outputs.cloud_build_status }}
+        run: |
+          clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9._/+-'; }
+          url() { printf '%s' "$1" | grep -Eqx 'https://[A-Za-z0-9._/?=&%+-]+' && printf '%s' "$1"; return 0; }
+          tier=$(clean "${TIER:-${IN_TIER:-small}}"); ref=$(clean "$REF")
+          ver=$(clean "$VERSION"); [ -n "$ver" ] || ver="not resolved (input: '$(clean "$IN_VERSION")'; default: tag name on a tag push, else yyyymmdd-<commit>)"
+          dry=$DRY_RUN; [ -n "$dry" ] || { [ "$EVENT" = workflow_dispatch ] && [ "$IN_DRY_RUN" = true ] && dry=true || dry=false; }
+          case "$ref" in refs/heads/main|refs/tags/v*) allowed=true ;; *) allowed=false ;; esac
+          cb_link=$(url "$CB_URL"); zip_link=$(url "$ZIP_URL")
+
+          if [ "$allowed" != true ]; then
+            head="Skipped: $ref is not main or a v* tag, so build and publish did not run"
+            more="publish-kit only builds and publishes from \`refs/heads/main\` or a \`v*\` tag. Run it again with **Use workflow from: main**."
+          elif [ "$BUILD_RESULT" = failure ] || [ "$BUILD_RESULT" = cancelled ]; then
+            head="Build $BUILD_RESULT: nothing was published"
+            more="The small kit could not be built on the runner, so the publish job did not run. See the build job's log."
+          elif [ "$PUBLISH_RESULT" = success ] && [ "$dry" = true ] && [ "$tier" = small ]; then
+            head="Dry run OK: small kit built and verified, nothing uploaded"
+            more="Both jobs ran, the zip was handed over and checked against the real bucket, but no upload was made. Untick dry_run to publish."
+          elif [ "$PUBLISH_RESULT" = success ] && [ "$dry" = true ]; then
+            head="Dry run OK: $tier inputs and pins validated only; Cloud Build was not started"
+            more="A $tier dry run validates the inputs, the manifest pins and the gcs-publish configuration. **No kit was built and nothing was uploaded.** Untick dry_run to build and publish on Cloud Build."
+          elif [ "$PUBLISH_RESULT" = success ] && [ "$PUBLISHED" = true ]; then
+            head="Published $tier kit $ver"
+            more="Uploaded to the private bucket; links below."
+          elif [ "$PUBLISH_RESULT" = failure ] || [ "$PUBLISH_RESULT" = cancelled ]; then
+            head="Publish job $PUBLISH_RESULT"
+            more="See the publish job's log. If the gcs-publish approval was rejected, the job never started."
+            [ -n "$CB_ID" ] && more="$more Cloud Build \`$(clean "$CB_ID")\` was submitted (status: ${CB_STATUS:-unknown}) and keeps running on its own; check it in the console."
+          else
+            head="Publish job: ${PUBLISH_RESULT:-not run}"
+            more="The publish job did not report a published kit."
+          fi
+          {
+            echo "# publish-kit: $head"
+            echo
+            echo "$more"
+            echo
+            echo "| input | value |"
+            echo "|---|---|"
+            echo "| tier | \`$tier\` |"
+            echo "| version | \`$ver\` |"
+            echo "| dry_run | \`$dry\` |"
+            echo "| event | \`$(clean "$EVENT")\` |"
+            echo "| ref | \`$ref\` |"
+            echo "| commit | \`$(clean "$SHA")\` |"
+            echo "| started by | \`$(clean "$ACTOR")\` |"
+            echo
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "| build (small kit on a GitHub runner) | ${BUILD_RESULT:-unknown} |"
+            echo "| publish (gcs-publish environment) | ${PUBLISH_RESULT:-unknown} |"
+            if [ "$BUILD_RESULT" = skipped ] && [ "$allowed" = true ] && [ "$tier" != small ]; then
+              echo
+              echo "build is skipped for $tier on purpose: medium and large are built on Cloud Build by the publish job."
+            fi
+            if [ -n "$ZIP_NAME" ]; then
+              echo
+              echo "**Kit**"
+              echo
+              echo "* zip: \`$(clean "$ZIP_NAME")\`"
+              [ -n "$SIZE" ] && echo "* size: $(awk -v b="$(clean "$SIZE")" 'BEGIN { printf "%.2f GB (%d bytes)", b / 1e9, b }')"
+              [ -n "$SHA256" ] && echo "* sha256: \`$(clean "$SHA256")\`"
+            fi
+            if [ -n "$CB_ID" ]; then
+              echo
+              echo "**Cloud Build:** [\`$(clean "$CB_ID")\`]($cb_link) status: $(clean "${CB_STATUS:-unknown}")"
+            fi
+            if [ -n "$GS_URI" ]; then
+              echo
+              echo "## Published kit"
+              echo
+              echo "\`$(printf '%s' "$GS_URI" | grep -Ex 'gs://[a-z0-9._-]+/[A-Za-z0-9._/-]+')\`"
+              echo
+              echo "The bucket is **private** (public access prevention): open these signed in with a Google account"
+              echo "that has access. Plain storage.googleapis.com URLs return an error without credentials."
+              echo
+              echo "* zip: [console]($zip_link) · [download (signed-in browser)]($(url "$ZIP_BROWSER_URL"))"
+              echo "* [sha256 sidecar]($(url "$SHA256_URL"))"
+              echo "* [KIT-INFO.json]($(url "$KIT_INFO_URL"))"
+              echo "* [latest.json]($(url "$LATEST_URL"))"
+              echo "* [version folder]($(url "$FOLDER_URL"))"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          link=""; [ -n "$zip_link" ] && link=" - $zip_link"; [ -z "$link" ] && [ -n "$cb_link" ] && link=" - Cloud Build $cb_link"
+          echo "::notice title=publish-kit result ($tier)::$head$link"

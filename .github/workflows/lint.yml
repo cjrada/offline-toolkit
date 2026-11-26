@@ -18,7 +18,7 @@ jobs:
         run: python3 -m py_compile tools/*.py tests/*.py
       - name: setup-gcp static checks (explicit IAM conditions, no prompts)
         run: python3 tests/test_setup_gcp.py
-      - name: publish-kit workflow static checks (zip hand-off not decompressed)
+      - name: publish-kit workflow static checks (zip hand-off, gating, run summary)
         run: python3 tests/test_publish_workflow.py
       - name: cloudbuild.yaml static checks (pinned images, upload python, cache steps)
         run: python3 tests/test_cloudbuild.py
