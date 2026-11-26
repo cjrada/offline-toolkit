@@ -13,9 +13,11 @@ permissions: {}
 jobs:
   deploy:
     name: "pages · build and deploy the downloads page"
-    # Manual runs (workflow_dispatch): main only, never a branch or a tag. When publish-kit calls it
-    # (workflow_call), github.ref is publish-kit's: main, or refs/tags/v* after a tag publish. In a called
-    # workflow github.event_name is workflow_call, not push, so the tag case must not test for push.
+    # Manual runs of this workflow: main only, never a branch or a tag. When publish-kit calls it, the
+    # github context is the caller's (GitHub's reusable-workflow docs): github.ref is main or refs/tags/v*,
+    # and github.event_name is publish-kit's event (push for a tag push, workflow_dispatch for a manual
+    # publish-kit run). The condition does not depend on that detail: a v* tag deploys for any event except
+    # workflow_dispatch, so it accepts push (or workflow_call) and excludes only a manual dispatch on a tag.
     # (Tag deploys also need a v* deployment rule on the github-pages environment; docs/SETUP.md.)
     if: >-
       github.repository == 'cjrada/offline-toolkit' &&

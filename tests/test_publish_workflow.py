@@ -608,8 +608,8 @@ def check_pages(text):
         problems.append(f"pages deploy needs its own concurrency group (pages-deploy, no cancel), got {conc!r}")
     c = norm(job.get("if"))
     if "github.event_name == 'push'" in c:
-        problems.append("pages deploy must not require event_name == 'push': pages.yml never runs on push, so a "
-                        "tag publish (workflow_call) would be skipped")
+        problems.append("pages deploy must not require event_name == 'push' for tags: a called workflow sees the "
+                        "caller's event, so key the tag case on excluding workflow_dispatch instead of on push")
     try:
         for event, ref, want in PAGES_CASES:
             for repo, ok in (("cjrada/offline-toolkit", want), ("someone/fork", False)):
@@ -783,7 +783,8 @@ def main():
             ("          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n", "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n", "secrets"),
             ("@368f82528645a54fb793d4d04e342629a3f51346", "@v5", "full commit SHA"),
             ("    if: >-\n      github.repository == 'cjrada/offline-toolkit' &&\n", "    if: >-\n", "someone/fork"),
-            # the dead tag clause this replaces: requires push, which a called workflow may not see
+            # the tag clause this replaces: it keyed the tag case on the caller's event being push; keep the rule
+            # that it must not be required, so the condition never depends on how a called run reports its event
             ("(startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch')",
              "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))", "event_name == 'push'"),
             # tag clause dropped: a v* tag publish would not update the page

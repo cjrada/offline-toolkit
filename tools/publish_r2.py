@@ -304,6 +304,12 @@ class R2:
             # If the object is exactly ours, the publish went through: carry on instead of failing a good upload.
             if sha and self._landed(key, size, sha):
                 log(f"  {key} was completed by an earlier attempt whose reply was lost (same size and sha256)")
+                # Best effort: if it was not our completion after all, our upload is still open and its parts
+                # would bill until the bucket's incomplete-upload lifecycle removes them. 404 if it was ours.
+                try:
+                    self.send("DELETE", key, query={"uploadId": upload_id})
+                except Exception:
+                    pass
                 return
             raise
 

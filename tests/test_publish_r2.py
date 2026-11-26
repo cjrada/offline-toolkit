@@ -373,7 +373,34 @@ class Publish(Base):
                 if "index" not in pat:  # manifests are plain overwrites: a retry just writes them again
                     self.assertIn("earlier attempt whose reply was lost", self.out)
                 self.assertEqual(self.versions("small"), ["v1"])
-                self.assertEqual(self.fake.aborts, [])
+                # only an accepted complete makes a (harmless, best-effort) abort call; the object stays
+                self.assertEqual(len(self.fake.aborts), 1 if "uploadId" in pat else 0)
+                self.assertIn("small/v1/offline-toolkit-small-v1.zip", self.fake.objects)
+
+    def test_accepted_foreign_complete_aborts_our_open_upload(self):
+        # Our complete fails (not a lost reply) but an identical object is there: accept, and abort our upload.
+        self.fake.fail = [("POST", r"\.zip\?uploadId=", 400)]
+        z = kit(self.tmp, "small", "v1")
+        zbytes = open(z, "rb").read()
+        sha = hashlib.sha256(zbytes).hexdigest()
+        def plant(fake):
+            fake.objects["small/v1/offline-toolkit-small-v1.zip"] = {
+                "data": zbytes, "meta": {"x-amz-meta-sha256": sha}, "ctype": "application/zip", "cc": None}
+        self.fake.on_first_part = plant
+        # the pre-complete HEAD would see the planted object; hide it for that one check
+        calls = {"n": 0}
+        real_handle = self.fake._handle
+
+        def handle(method, url, key, qs, data, headers, body):
+            if method == "HEAD" and key.endswith(".zip"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return 404, {}, b""
+            return real_handle(method, url, key, qs, data, headers, body)
+        self.fake._handle = handle
+        self.assertEqual(self.run_pub(["--zip", z]), 0, self.out)
+        self.assertEqual(len(self.fake.uploads), 0, "our multipart upload was left open")
+        self.assertEqual(len(self.fake.aborts), 1)
 
     def test_retry_conflict_with_other_bytes_still_fails(self):
         def other(fake):
