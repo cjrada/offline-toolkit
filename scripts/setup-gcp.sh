@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-time (and safe to re-run) Google Cloud setup for publishing kits from GitHub Actions. No keys.
+# One-time (and safe to re-run) Google Cloud setup for building kits on Cloud Build from GitHub Actions.
+# No service-account keys. Kits are published to Cloudflare R2; GCS is only Cloud Build's private download cache.
 # Run in Cloud Shell as a project owner:
 #
 #   bash scripts/setup-gcp.sh [PROJECT_ID] [--create-project --billing-account XXXXXX-XXXXXX-XXXXXX]
@@ -8,7 +9,7 @@
 # Creates or updates:
 #   * billing: checks it is enabled. --billing-account links a project with NO billing account; a project
 #     already linked to a different account is never moved (the script stops instead).
-#   * the APIs: storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager, logging
+#   * the APIs: storage, iam, iamcredentials, sts, cloudbuild, cloudresourcemanager, logging, secretmanager
 #   * a PRIVATE bucket (default <project>-kits): uniform access, public access prevention ENFORCED,
 #     7-day soft delete. Any allUsers / allAuthenticatedUsers binding found is removed.
 #   * service accounts: kit-publisher (the workflow impersonates it) and kit-builder (Cloud Build runs as it)
@@ -18,6 +19,10 @@
 #     except kits/<tier>/latest.json. kit-publisher may start Cloud Builds that run as kit-builder.
 #     kit-builder may also READ objects under cache/ (the shared download cache of Cloud Build runs; it
 #     writes them create-only like everything else). Nothing else can read the bucket.
+#   * Secret Manager secrets r2-access-key-id, r2-secret-access-key, r2-account-id (created EMPTY if missing;
+#     this script never sees or prints a value) that only kit-builder may read (secretAccessor on each
+#     secret, nothing project-wide). Cloud Build reads them to upload medium/large kits to R2. Add the values
+#     yourself from stdin (see the end of the output).
 set -euo pipefail
 # Never prompt: any question gcloud would ask becomes an error, which set -e turns into a non-zero exit.
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
@@ -113,7 +118,7 @@ say "APIs"
 for try in 1 2 3 4; do
   run gcloud services enable storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com \
     sts.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com logging.googleapis.com \
-    --project="$PROJECT_ID" && break
+    secretmanager.googleapis.com --project="$PROJECT_ID" && break
   [ "$try" -lt 4 ] || { echo "could not enable the APIs; check billing on $PROJECT_ID and re-run" >&2; exit 1; }
   echo "  enabling APIs failed (billing may still be propagating); retrying in 30 s" >&2; sleep 30
 done
@@ -184,10 +189,26 @@ run gcloud iam service-accounts add-iam-policy-binding "$BLD" --project="$PROJEC
 # Builder: write build logs (cloudbuild.yaml uses CLOUD_LOGGING_ONLY).
 run gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$BLD" --role=roles/logging.logWriter --condition=None >/dev/null
 
+say "Secret Manager: R2 credentials for Cloud Build (values are never read or printed here)"
+# cloudbuild.yaml maps these to R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID (availableSecrets).
+# Only kit-builder may read them, per secret. kit-publisher (GitHub) does not need them: GitHub has its own copy.
+R2_SECRET_IDS="r2-access-key-id r2-secret-access-key r2-account-id"
+MISSING_VERSIONS=""
+for sec in $R2_SECRET_IDS; do
+  exists gcloud secrets describe "$sec" --project="$PROJECT_ID" ||
+    run gcloud secrets create "$sec" --project="$PROJECT_ID" --replication-policy=automatic >/dev/null
+  run gcloud secrets add-iam-policy-binding "$sec" --project="$PROJECT_ID" --member="serviceAccount:$BLD" \
+    --role=roles/secretmanager.secretAccessor --condition=None >/dev/null
+  # Lists version names only (never payloads), to say which secrets still need a value.
+  if [ "$DRY" = 1 ] || [ -z "$(gcloud secrets versions list "$sec" --project="$PROJECT_ID" --filter=state:ENABLED --limit=1 --format='value(name)' 2>/dev/null)" ]; then
+    MISSING_VERSIONS="$MISSING_VERSIONS $sec"
+  fi
+done
+
 WIF="projects/$PROJECT_NUM/locations/global/workloadIdentityPools/$POOL/providers/$PROVIDER"
 cat <<EOF
 
-== Done. Now configure GitHub (no secrets needed - these values are not sensitive)
+== Done. Now configure GitHub (steps 1-2: the gcs-publish values below are not sensitive)
 
 Cloud Shell may not have the GitHub CLI (gh). Everything below can also be done in the web UI:
 https://github.com/$REPO/settings/environments -> gcs-publish (create it, then "Add environment variable").
@@ -209,9 +230,27 @@ https://github.com/$REPO/settings/environments -> gcs-publish (create it, then "
    gh variable set GCP_SERVICE_ACCOUNT --env $ENV_NAME --body "$PUB" -R $REPO
    gh variable set GCS_BUCKET          --env $ENV_NAME --body "$BUCKET" -R $REPO
 
-3. Run Actions -> publish-kit -> Run workflow (dry_run first), or push a tag: git tag v1.0.0 && git push origin v1.0.0
+3. Kits go to Cloudflare R2. Set the repository variables (Settings -> Secrets and variables -> Actions ->
+   Variables) R2_BUCKET = the R2 bucket name and R2_PUBLIC_URL = its public base URL (r2.dev or custom
+   domain, no trailing slash), and the repository secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID.
 
-Download a kit later (private bucket; you need storage.objects.get on it, e.g. as project owner):
-   gcloud storage cat gs://$BUCKET/kits/small/latest.json
-   gcloud storage cp "gs://$BUCKET/kits/small/<version>/offline-toolkit-small-<version>.zip*" .
+4. Give Cloud Build (medium/large) the same R2 credentials in Secret Manager. Paste each value on stdin,
+   so it is not in your shell history or on the command line, then press Enter and Ctrl-D:
+
+   gcloud secrets versions add r2-access-key-id     --project=$PROJECT_ID --data-file=-
+   gcloud secrets versions add r2-secret-access-key --project=$PROJECT_ID --data-file=-
+   gcloud secrets versions add r2-account-id        --project=$PROJECT_ID --data-file=-
+
+   (A trailing newline is fine: the publisher strips whitespace.) To rotate a token later, add a new
+   version the same way and disable the old one: gcloud secrets versions disable <n> --secret=<id>
+EOF
+if [ -n "$MISSING_VERSIONS" ]; then
+  echo
+  echo "   Still without a value:$MISSING_VERSIONS  (medium/large builds fail before their first step until set)"
+fi
+cat <<EOF
+
+5. Run Actions -> publish-kit -> Run workflow (dry_run first), or push a tag: git tag v1.0.0 && git push origin v1.0.0
+   Public downloads: https://cjrada.github.io/offline-toolkit/ (GitHub Pages, built from the R2 manifests).
+   Old kits under gs://$BUCKET/kits/ are no longer written or deleted by CI; see docs/SETUP.md to retire them.
 EOF

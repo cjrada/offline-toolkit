@@ -1,9 +1,9 @@
 #!/bin/sh
-# Run a stdlib-only repo script (e.g. tools/publish_gcs.py) with a Python inside the cloud-sdk image.
+# Run a stdlib-only repo script (e.g. tools/publish_r2.py) with a Python inside the cloud-sdk image.
 # The pinned cloud-sdk image has no python3 on PATH (the medium build of 18 Nov 2026 built its kit and then
 # failed with: exec "python3": executable file not found), but gcloud ships its own interpreter and
 # `gcloud info` says where it is. Tried in order: python3 on PATH, $CLOUDSDK_PYTHON, gcloud's python.
-#   sh tools/cloudsdk_python.sh tools/publish_gcs.py --zip ... --bucket ...
+#   sh tools/cloudsdk_python.sh tools/publish_r2.py --zip ...
 set -eu
 py=""
 if command -v python3 >/dev/null 2>&1; then

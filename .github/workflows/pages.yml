@@ -1,0 +1,65 @@
+# Build the public downloads page from the R2 manifests and deploy it to GitHub Pages
+# (https://cjrada.github.io/offline-toolkit/).
+#  * publish-kit calls this after a successful, verified, non-dry-run publish (workflow_call).
+#  * Actions -> pages -> Run workflow on main rebuilds the page by hand without publishing anything.
+# No secrets: the manifests (index.json) are public, so tools/build_site.py fetches them over HTTPS from
+# vars.R2_PUBLIC_URL. The job can only deploy Pages (pages: write + id-token: write for deploy-pages) in the
+# github-pages environment; it has no R2 or Google credentials and needs no gcs-publish approval.
+name: pages
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions: {}
+jobs:
+  deploy:
+    name: "pages · build and deploy the downloads page"
+    # Manual runs: main only. When publish-kit calls it, github.ref is publish-kit's (main or a v* tag push).
+    if: >-
+      github.repository == 'cjrada/offline-toolkit' &&
+      (github.ref == 'refs/heads/main' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read   # check out tools/build_site.py
+      pages: write     # deploy-pages
+      id-token: write  # deploy-pages proves the deployment with GitHub's OIDC token (Pages only)
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # Two deploys never overlap (a manual rebuild and a publish, or two publishes); a queued one waits.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the downloads page from the public manifests
+        env:
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+        run: |
+          python3 -I tools/build_site.py --public-url "$R2_PUBLIC_URL" --out "$RUNNER_TEMP/site"
+          ls -la "$RUNNER_TEMP/site"
+
+      - name: Upload the page
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Job summary
+        if: always()
+        env:
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          url=$(printf '%s' "$PAGE_URL" | grep -Ex 'https://[A-Za-z0-9._/-]+' || true)
+          {
+            echo "## pages · downloads page"
+            echo
+            echo "deploy: ${OUTCOME:-not run}${url:+ - [$url]($url)}"
+          } >> "$GITHUB_STEP_SUMMARY"
