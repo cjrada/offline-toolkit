@@ -184,7 +184,7 @@ export function ungroundedNumbers(answer, sources){
 // page shows it; rag default: computed here with the page's guards), finish}. Returns [{check, ok, detail}].
 export function scoreAnswer(c, answer, {mode = c.mode, hits = [], exact = [], shown, finish = "stop"} = {}){
   answer = normApos(answer);                       // models often write Don’t / can’t (U+2019)
-  shown = normApos(shown ?? shownAnswer(answer, hits, exact, c.question, mode).text);
+  shown = normApos(shown ?? shownAnswer(answer, hits, exact, c.question, mode, c.history || []).text);
   const res = [], add = (check, ok, detail = "") => res.push(ok ? {check, ok} : {check, ok, detail});
   add("answered", !!answer.trim() && finish !== "length" && !/<\/?think>/i.test(answer),
     !answer.trim() ? "empty answer" : finish === "length" ? "cut off at max_tokens" : /<\/?think>/i.test(answer) ? "leaked <think>" : "");
@@ -340,8 +340,8 @@ export function buildRequest(c, {ix, docs = {}, ctx = DEFAULT_CTX, temperature, 
 // for a medicine question). Ask the Manuals then: the exact box's text and the answer after its amount guards (rag.js
 // renderAnswer: doses without the source's conditions and figures not in the sources become "[amount removed]").
 export const REMOVED = "[amount removed]";
-export function shownAnswer(answer, hits, exact = [], question = "", mode = "rag"){
-  const m = M.guardMedicine(question, answer);
+export function shownAnswer(answer, hits, exact = [], question = "", mode = "rag", history = []){
+  const m = M.guardMedicine(question, answer, history);
   if (mode !== "rag") return {text: m.text, removed: m.removed, doses: []};
   const g = X.guardAnswer(m.text, X.allowedText(exact, hits));
   return {text: g.text.replace(/\u0001/g, REMOVED), removed: m.removed + g.removed, doses: g.doses};
@@ -372,7 +372,7 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
       else try { out = await complete(base, b, timeout); }
       catch (e) { out = {text: "", finish: "error", ms: 0, tokens: null, tps: null, error: String(e.message || e)}; }
       const text = c.mode === "rag" ? R.tidyAnswer(out.text) : out.text;
-      const sh = !out.error ? shownAnswer(text, hits, exact, c.question, c.mode) : {text, removed: 0, doses: []};
+      const sh = !out.error ? shownAnswer(text, hits, exact, c.question, c.mode, c.history || []) : {text, removed: 0, doses: []};
       const checks = out.error ? [{check: "request", ok: false, detail: out.error}] : scoreAnswer(c, text, {hits, exact, shown: sh.text, finish: out.finish});
       // with the exact box shown the model was told to write no figure at all: count the ones it wrote anyway
       const figs = exact.length && !["no-sources", "refused"].includes(out.finish) ? X.figures(text).length : 0;

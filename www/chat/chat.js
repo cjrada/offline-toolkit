@@ -62,8 +62,8 @@ export const passageBudget = ctx => Math.min(3600, Math.floor(historyBudget(ctx)
 // What the page sends for the conversation history (last turn = the question). -> {refuse} for a medicine dose
 // question (the page shows REFUSAL and does not ask the AI), else {messages, hits} (hits: the first aid passages sent).
 export function chatRequest(history, {ctx = DEFAULT_CTX, ix = null} = {}){
-  const q = history.at(-1)?.content || "";
-  if (medicineDoseQuestion(q)) return {refuse: true, messages: null, hits: []};
+  const q = history.at(-1)?.content || "", prior = history.slice(0, -1);
+  if (medicineDoseQuestion(q, prior)) return {refuse: true, messages: null, hits: []};   // also "how much for a 15 kg toddler?" after a paracetamol question
   const fa = ix && firstAidQuestion(q) ? firstAidPassages(ix, q, passageBudget(ctx)) : null;
   const budget = historyBudget(ctx) - (fa ? fa.text.length : 0);
   return {refuse: false, hits: fa ? fa.hits : [], messages: messages(history, budget, fa ? `${FIRST_AID_RULE}\n\n${fa.text}` : "")};
@@ -134,14 +134,15 @@ if (typeof document !== "undefined") {
     ctl = new AbortController(); $("stop").hidden = false; $("send").disabled = true;
     const done = () => { ctl = null; $("stop").hidden = true; $("send").disabled = false; $("q").focus(); };
     $("q").value = ""; const turn = session.ask(q); bubble("user", q);
-    if (medicineDoseQuestion(q)) {                       // never ask the AI for a medicine dose
+    const prior = session.history.slice(0, -1);          // the earlier turns: a follow-up can be a dose question too
+    if (medicineDoseQuestion(q, prior)) {                // never ask the AI for a medicine dose
       bubble("assistant", REFUSAL); session.finish(turn, REFUSAL); done(); return; }
     const ctx = await aiContext(base);
     const ix = firstAidQuestion(q) ? await kitIndex() : null;
     if (!session.isCurrent(turn) || ctl.signal.aborted) { session.finish(turn, ""); done(); return; }   // cleared or stopped meanwhile
     const req = chatRequest(session.history, {ctx, ix});
     const d = bubble("assistant", ""); d.querySelector(".body").textContent = "Thinking… (on a laptop without a GPU this can take a minute)";
-    const show = t => { setBody(d, "assistant", guardMedicine(q, t).text);
+    const show = t => { setBody(d, "assistant", guardMedicine(q, t, prior).text);
       if (!req.hits.length) return;
       const byDoc = new Map(); for (const h of req.hits) (byDoc.get(h.f) || byDoc.set(h.f, []).get(h.f)).push(h);
       d.querySelector(".body").insertAdjacentHTML("beforeend", '<p class="small">From the kit manuals: ' + [...byDoc].map(([f, hs]) =>
@@ -164,7 +165,7 @@ if (typeof document !== "undefined") {
       else d.querySelector(".body").textContent = "Could not reach the local AI on port 8080 - is it still starting? (" + err.message + ")";
       if (txt) show(txt);
     }
-    if (txt) txt = guardMedicine(q, txt).text;   // history keeps what the reader saw, never a removed dose
+    if (txt) txt = guardMedicine(q, txt, prior).text;   // history keeps what the reader saw, never a removed dose
     session.finish(turn, txt);   // dropped if "New chat" was pressed meanwhile
     done();
   };

@@ -58,9 +58,11 @@ $("f").onsubmit = async e => {
   const hits = search(ix, q, {maxChars: sourceBudget(ctx, q)});
   $("srcH").hidden = false;
   $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
+  // A medicine dose question: the refusal only, and no exact box (no source amounts beside it), whatever was found.
+  if (medicineDoseQuestion(q)){ $("exact").innerHTML = ""; $("exact").hidden = true;
+    $("answer").classList.add("md"); $("answer").innerHTML = renderMarkdown(REFUSAL); return; }
   const exact = extractExact(ix, q, hits), title = c => docs[c.f]||c.f;
   $("exact").innerHTML = renderExact(exact, title, where, srcLink); $("exact").hidden = !exact.length;
-  if (medicineDoseQuestion(q)){ $("answer").classList.add("md"); $("answer").innerHTML = renderMarkdown(REFUSAL); return; }
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
   const messages = buildMessages(q, hits, title, where, exact), allowed = allowedText(exact, hits);
   const out = $("answer"); out.textContent = "Thinking… (first answer on a slow laptop can take a minute)";

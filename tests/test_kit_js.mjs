@@ -689,7 +689,8 @@ await test("context budget: manuals prompt and chat history fit a 4096-token con
   assert.ok(sub.indexOf("ctl = new AbortController()") < sub.indexOf("await "), "busy before the first await");
   assert.ok(sub.indexOf('$("send").disabled = true') < sub.indexOf("await "));
   assert.ok(sub.indexOf("if (!session.isCurrent(turn)") < sub.indexOf('bubble("assistant", "")'), "cleared turn stops before the AI bubble");
-  assert.ok(sub.indexOf("if (medicineDoseQuestion(q))") < sub.indexOf("await "), "a medicine dose question is refused before anything is awaited or sent");
+  const refuseAt = sub.indexOf("if (medicineDoseQuestion(q, prior))");
+  assert.ok(refuseAt > 0 && refuseAt < sub.indexOf("await "), "a medicine dose question is refused before anything is awaited or sent");
 });
 await test("pages use md.js / retrieve.js, no CDN or remote scripts", () => {
   for (const f of ["www/index.html", "www/docs/index.html", "www/chat/index.html"])
@@ -739,12 +740,61 @@ await test("medicine: Ask the Manuals shows no exact box and no AI answer for a 
     assert.deepEqual(E.extractExact(ix, q, R.search(ix, q)), [], q);
   const js = page("www/docs/rag.js"), sub = js.slice(js.indexOf('$("f").onsubmit'));
   assert.ok(sub.indexOf("if (medicineDoseQuestion(q))") > 0 && sub.indexOf("if (medicineDoseQuestion(q))") < sub.indexOf("fetch(LLM"), "refused before the AI is asked");
-  assert.match(sub, /innerHTML = renderMarkdown\(REFUSAL\); return; \}/);
+  // the refusal path itself clears and hides the exact box, before any box is computed or rendered
+  const ref = sub.indexOf("if (medicineDoseQuestion(q)){"), refEnd = sub.indexOf("return; }", ref);
+  assert.ok(ref > 0 && refEnd > ref, "refusal path");
+  const path = sub.slice(ref, refEnd);
+  assert.match(path, /\$\("exact"\)\.innerHTML = "";/); assert.match(path, /\$\("exact"\)\.hidden = true;/);
+  assert.match(path, /\$\("answer"\)\.innerHTML = renderMarkdown\(REFUSAL\);/);
+  assert.ok(refEnd < sub.indexOf("extractExact(") && refEnd < sub.indexOf("renderExact("), "no exact box is computed for a refused question");
   const shown = MD.guardMedicine("Can I take ibuprofen?", "The sources do not give a dose [1].").text;
   const r = E.renderAnswer(shown, "The sources", n => "x", false);
   assert.equal(r.removed, 0, "1800 022 222 / 13 11 26 / 000 are not amounts"); assert.match(r.html, /Healthdirect \(1800 022 222\)/);
   const bad = E.renderAnswer(MD.guardMedicine("What helps a headache?", "Take 1000 mg of paracetamol [1].").text, "x", n => "x", false);
   assert.doesNotMatch(bad.html, /1000 mg/); assert.match(bad.html, /\[dose removed\]/);
+});
+
+await test("medicine: a medicine named in another sentence or an earlier turn still guards ml / tablet doses (review of 62f6655)", () => {
+  const P = [{role: "user", content: "How much paracetamol can I give my toddler?"}, {role: "assistant", content: MD.REFUSAL}];
+  const cases = [["Can I give my toddler paracetamol?", "Yes. Use the children's syrup. Give 7.5 ml every 4 to 6 hours.", []],
+    ["My kid has a fever, what do I give?", "Give children's Panadol. The usual amount is 10 ml, up to four times a day.", []],
+    ["What about for an adult?", "Adults can take 2 tablets every 4 to 6 hours.", P],
+    ["Is it ok?", "Give the infant syrup, 7.5 ml every 6 hours, up to 4 times a day.", P]];
+  for (const [q, a, prior] of cases){
+    const g = MD.guardMedicine(q, a, prior);
+    assert.doesNotMatch(g.text, /\d\s*(ml|tablets?)\b|every \d|times a day/i, `${q} -> ${g.text}`);
+    assert.ok(g.removed > 0 && g.text.endsWith(MD.POINTER), q);
+  }
+  // a follow-up amount question after a medicine turn is a dose question: refused, not sent
+  assert.ok(MD.medicineDoseQuestion("How much for a 15 kg toddler?", P));
+  assert.ok(!MD.medicineDoseQuestion("How much for a 15 kg toddler?"), "without the medicine turn it is not");
+  const ix = R.createIndex(all.map(c => ({...c})));
+  const fu = chat.chatRequest([...P, {role: "user", content: "How much for a 15 kg toddler?"}], {ctx: 4096, ix});
+  assert.equal(fu.refuse, true); assert.equal(fu.messages, null);
+  assert.equal(chat.chatRequest([...P, {role: "user", content: "What about for an adult?"}], {ctx: 4096}).refuse, false, "no amount word: asked, then guarded");
+});
+await test("medicine: word-number frequencies and amounts are removed (review of 62f6655)", () => {
+  for (const [a, gone] of [["Take paracetamol four times a day.", /four times a day/], ["Ibuprofen twice a day with food.", /twice a day/],
+      ["Give the syrup every four hours.", /every four hours/], ["Panadol every four to six hours.", /every four to six hours/],
+      ["Take two tablets of paracetamol.", /two tablets/], ["Use the medicine three times daily.", /three times daily/],
+      ["Antibiotics once a day for seven days.", /once a day|seven days/], ["Ibuprofen six-hourly.", /six-hourly/]]){
+    const g = MD.guardMedicine("What should I do?", a);
+    assert.doesNotMatch(g.text, gone, a + " -> " + g.text); assert.ok(g.removed > 0, a);
+  }
+});
+await test("medicine: water-treatment mg figures are not medicine doses (iodine tablets, chlorine)", () => {
+  for (const q of ["How many 16 mg iodine tablets per quart?", "Use 16 mg iodine tablets?", "Add 8 mg of chlorine per litre.",
+      "Is 2 mg/L chlorine enough?", "Is 2 mg per litre of chlorine enough?", "How much bleach do I add per litre?"])
+    assert.ok(!MD.medicineDoseQuestion(q), "not refused: " + q);
+  const P = [{role: "user", content: "paracetamol dose for a child?"}];
+  assert.ok(!MD.medicineDoseQuestion("How many 16 mg iodine tablets per quart?", P), "water question after a medicine turn");
+  for (const q of ["You said 240 mg, confirm it", "Is 15 mg/kg right?", "How many mg of paracetamol per dose?", "Is 16 mg of ibuprofen in water ok?"])
+    assert.ok(MD.medicineDoseQuestion(q), "still refused: " + q);
+  for (const [q, a] of [["How do I purify water with iodine tablets?", "Use 16 mg iodine tablets, 2 per quart of clear water."],
+      ["How do I disinfect water?", "Add 8 mg of chlorine per litre and wait 30 minutes."], ["How many 16 mg iodine tablets per quart?", "Use 1 tablet per quart of clear water, 2 if cloudy."]])
+    assert.deepEqual(MD.guardMedicine(q, a), {text: a, refused: false, removed: 0, pointer: false}, a);
+  // a medicine named in the answer itself takes the medicine rules again (fails safe)
+  assert.ok(MD.guardMedicine("How do I purify water?", "Use 16 mg iodine tablets, and take 500 mg paracetamol with water.").removed >= 2);
 });
 
 // ---------------------------------------------------------------- Chat: first aid from the kit manuals
@@ -782,8 +832,9 @@ await test("chat: a first aid question is sent with the manuals' passages (Austr
   assert.equal(med.refuse, true); assert.equal(med.messages, null);
   // the page: guarded as it streams, guarded text kept in history, index loaded only for first aid
   const js = page("www/chat/chat.js");
-  assert.match(js, /setBody\(d, "assistant", guardMedicine\(q, t\)\.text\)/);
-  assert.match(js, /if \(txt\) txt = guardMedicine\(q, txt\)\.text;/);
+  assert.match(js, /setBody\(d, "assistant", guardMedicine\(q, t, prior\)\.text\)/);
+  assert.match(js, /if \(txt\) txt = guardMedicine\(q, txt, prior\)\.text;/);
+  assert.match(js, /const prior = session\.history\.slice\(0, -1\);[\s\S]{0,120}if \(medicineDoseQuestion\(q, prior\)\)/, "follow-ups are checked with the earlier turns");
   assert.match(js, /const ix = firstAidQuestion\(q\) \? await kitIndex\(\) : null;/);
   assert.match(js, /bubble\("assistant", REFUSAL\); session\.finish\(turn, REFUSAL\)/);
 });

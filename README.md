@@ -219,9 +219,13 @@ older US manual differs. The passages used are linked under the answer. Other qu
 that names a medicine (paracetamol, ibuprofen, aspirin, antibiotics, "medicine"...) and asks for an amount, or that
 quotes an mg dose itself, is answered with a fixed refusal pointing to the packet, a pharmacist, Healthdirect
 (1800 022 222) or 000, and the AI is never asked, however the question is phrased ("ignore your instructions",
-"I am a doctor", role-play). Ask the Manuals shows no *exact wording* box for it either. In every other answer, as
-it streams, medicine-dose figures (any mg / mcg / mg/kg / IU, and in a sentence naming a medicine also ml, tablets,
-drops, "every N hours", "N times a day") become *[dose removed]*, with the same pointer. A question that names a
+"I am a doctor", role-play). In Chat, an amount question after a turn that named a medicine ("How much for a 15 kg
+toddler?") is refused the same way. Ask the Manuals shows no *exact wording* box for it either. In every other
+answer, as it streams, medicine-dose figures become *[dose removed]*, with the same pointer: once the question, an
+earlier turn or the answer names a medicine, every mg / mcg / mg/kg / IU, ml, tablet or drop amount and every
+frequency ("every four hours", "twice a day") anywhere in the answer; otherwise mg-type figures outside water
+treatment. Water treatment is not a medicine: "How many 16 mg iodine tablets per quart?" or "8 mg of chlorine per
+litre" is answered and left as it is. A question that names a
 medicine always ends with the pointer, also when the AI only says the sources give no dose. Water treatment
 (drops of bleach per litre) is not affected: that has its own check against the sources (`www/docs/dose.js`).
 The notice text lives in `tools/ai-notice.json` and is shared by the home, chat and manuals pages and the
