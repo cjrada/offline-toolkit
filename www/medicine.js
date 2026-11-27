@@ -28,7 +28,7 @@ const MED_NAMES = "paracetamol|acetaminophen|panadol|panamax|dymadon|ibuprofen|n
   "diazepam|valium|temazepam|melatonin|loperamide|gastrostop|ondansetron|maxolon|metoclopramide|hydralyte|" +
   "medicines?|medications?|meds|painkillers?|pain ?relie(?:f|vers?)|analgesics?|drugs?|syrups?";
 export const MED = new RegExp(`\\b(?:${MED_NAMES})\\b`, "i");
-const ASKS_AMOUNT = /\b(doses?|dosage|dosing|dosed|how (?:much|many|often)|mg|milligrams?|mcg|micrograms?|ml|mls|millilit\w*|mg\/kg|per (?:kg|kilo\w*)|grams?|teaspoons?|tsp|amount|quantity|maximum|max|strength|times a day)\b/i;
+const ASKS_AMOUNT = /\b(doses?|dosage|dosing|dosed|how (?:much|many|often)|mg|milligrams?|mcg|micrograms?|ml|mls|millilit\w*|mg\/kg|per (?:kg|kilo\w*)|grams?|teaspoons?|tsp|amount|quantity|maximum|max|strength|times a day|\d+(?:\.\d+)?\s*kg|kilos?)\b/i;   // "And for a 15 kg child?"
 export const medicineQuestion = q => MED.test(String(q));
 // Water treatment: iodine tablets ("16 mg iodine tablets"), chlorine in mg, bleach, purification. Not a medicine
 // dose, unless a medicine is named in the same conversation (then the medicine rules win: failing safe).
@@ -45,7 +45,9 @@ const hasAlways = s => new RegExp(ALWAYS.source, "i").test(s);
 // A dose once the text is about a medicine ("5 ml of children's ibuprofen", "two tablets every four hours", "twice a day").
 const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|teaspoons?|tsp|tablespoons?|tbsp|puffs?|doses?|sachets?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
   `|\\bevery\\s+${N}\\s*(?:hours?|hrs?|h)\\b|\\b${N1}[- ]hourly\\b` +
-  `|\\b(?:once|twice|thrice|${N}\\s*(?:times|x))\\s*(?:(?:a|per|each)\\s+day|daily)\\b|\\bfor\\s+${N}\\s*days\\b`, "gi");
+  `|\\b(?:once|twice|thrice|${N}\\s*(?:times|x))\\s*(?:(?:a|per|each)\\s+day|daily)\\b|\\bfor\\s+${N}\\s*days\\b` +
+  // a daily maximum with no unit: "max 6 in a day", "no more than 8 in 24 hours", "up to 4 a day"
+  `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b`, "gi");
 // The earlier user turns of a conversation, as text (history: [{role, content}] or [string]).
 const userTurns = (history = []) => history.map(m => typeof m === "string" ? m : m.role === "user" ? m.content : "").join("\n");
 // A medicine dose question:

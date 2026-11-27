@@ -768,6 +768,8 @@ await test("medicine: a medicine named in another sentence or an earlier turn st
   // a follow-up amount question after a medicine turn is a dose question: refused, not sent
   assert.ok(MD.medicineDoseQuestion("How much for a 15 kg toddler?", P));
   assert.ok(!MD.medicineDoseQuestion("How much for a 15 kg toddler?"), "without the medicine turn it is not");
+  assert.ok(MD.medicineDoseQuestion("And for a 15 kg child?", P), "a body weight after a medicine turn asks for a dose");
+  assert.ok(!MD.medicineDoseQuestion("How heavy is a 20 kg pack?"), "a weight alone is not a dose question");
   const ix = R.createIndex(all.map(c => ({...c})));
   const fu = chat.chatRequest([...P, {role: "user", content: "How much for a 15 kg toddler?"}], {ctx: 4096, ix});
   assert.equal(fu.refuse, true); assert.equal(fu.messages, null);
@@ -777,7 +779,10 @@ await test("medicine: word-number frequencies and amounts are removed (review of
   for (const [a, gone] of [["Take paracetamol four times a day.", /four times a day/], ["Ibuprofen twice a day with food.", /twice a day/],
       ["Give the syrup every four hours.", /every four hours/], ["Panadol every four to six hours.", /every four to six hours/],
       ["Take two tablets of paracetamol.", /two tablets/], ["Use the medicine three times daily.", /three times daily/],
-      ["Antibiotics once a day for seven days.", /once a day|seven days/], ["Ibuprofen six-hourly.", /six-hourly/]]){
+      ["Antibiotics once a day for seven days.", /once a day|seven days/], ["Ibuprofen six-hourly.", /six-hourly/],
+      // a daily maximum with no unit (review of e3dbd80)
+      ["Take ibuprofen, 1 or 2 tablets every 4–6 hours, max 6 in a day.", /max 6|in a day|\b[12] or|every 4/], ["Paracetamol: no more than 8 in 24 hours.", /no more than 8|24 hours/],
+      ["Give the syrup up to 4 a day.", /up to 4|a day/], ["Ibuprofen, maximum of 3 per day.", /maximum of 3|per day/]]){
     const g = MD.guardMedicine("What should I do?", a);
     assert.doesNotMatch(g.text, gone, a + " -> " + g.text); assert.ok(g.removed > 0, a);
   }
