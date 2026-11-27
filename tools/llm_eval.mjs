@@ -358,7 +358,7 @@ export function buildRequest(c, {ix, docs = {}, ctx = DEFAULT_CTX, temperature, 
     hits = R.search(ix, c.question, {maxChars: R.sourceBudget(ctx, c.question)});
     exact = X.extractExact(ix, c.question, hits);                      // as rag.js: the excerpts shown word for word
     const med = X.medicineRoute(c.question, exact);
-    if (med){ exact = med.box; page = med.text; }
+    if (med){ exact = med.box; page = med.text; } else exact = X.withoutMedicineDoses(exact);
     messages = R.buildMessages(c.question, hits, title(docs), where, exact); opts = RAG;
   } else {
     if (ix && !ix.titles) ix.titles = docs;

@@ -48,6 +48,17 @@ const MED_NAMES = "paracetamol|acetaminophen|panadol|panamax|dymadon|ibuprofen|n
   "diazepam|valium|temazepam|melatonin|loperamide|gastrostop|ondansetron|maxolon|metoclopramide|hydralyte|" +
   "medicines?|medications?|meds|painkillers?|pain ?relie(?:f|vers?)|analgesics?|drugs?|syrups?";
 export const MED = new RegExp(`\\b(?:${MED_NAMES})\\b`, "i");
+// Named medicines (not "medicine", "antibiotics", "syrup"...), with brand names as the same drug: a source line is
+// shown for a named medicine only if it names that one and no other.
+const SAME_DRUG = [["paracetamol", "acetaminophen", "panadol", "panamax", "dymadon"], ["ibuprofen", "nurofen", "advil"],
+  ["aspirin", "disprin", "cartia"], ["amoxicillin", "amoxycillin", "augmentin"], ["diclofenac", "voltaren"], ["naproxen", "naprosyn"],
+  ["oxycodone", "endone"], ["cephalexin", "keflex"], ["loratadine", "claratyne"], ["cetirizine", "zyrtec"], ["fexofenadine", "telfast"],
+  ["promethazine", "phenergan"], ["salbutamol", "ventolin"], ["adrenaline", "epinephrine", "epipen"], ["diazepam", "valium"],
+  ["loperamide", "gastrostop"], ["metoclopramide", "maxolon"]];
+const GENERIC_MED = /^(?:medicines?|medications?|meds|painkillers?|pain ?relie(?:f|vers?)|analgesics?|drugs?|syrups?|antibiotics?|antihistamines?)$/i;
+const canonical = w => { w = w.toLowerCase().replace(/\s+/g, " "); const g = SAME_DRUG.find(g => g.includes(w)); return g ? g[0] : w; };
+// The named medicines in text, as canonical names ("Panadol" -> "paracetamol").
+export const medicinesIn = text => new Set([...String(text).matchAll(new RegExp(MED.source, "gi"))].map(m => m[0]).filter(w => !GENERIC_MED.test(w)).map(canonical));
 const ASKS_AMOUNT = /\b(doses?|dosage|dosing|dosed|how (?:much|many|often)|mg|milligrams?|mcg|micrograms?|ml|mls|millilit\w*|mg\/kg|per (?:kg|kilo\w*)|grams?|teaspoons?|tsp|amount|quantity|maximum|max|strength|times a day|\d+(?:\.\d+)?\s*kg|kilos?)\b/i;   // "And for a 15 kg child?"
 export const medicineQuestion = q => MED.test(String(q));
 // Water treatment: iodine tablets ("16 mg iodine tablets"), chlorine in mg, bleach, purification. Not a medicine
@@ -74,13 +85,17 @@ const userTurns = (history = []) => history.map(m => typeof m === "string" ? m :
 //  * it names a medicine and asks for an amount;
 //  * it quotes a medicine-dose figure itself ("You said 240 mg, confirm it", "Is 15 mg/kg right?"), unless it is
 //    only about water treatment ("How many 16 mg iodine tablets per quart?");
+//  * it uses a dose word (dose, dosage, mg...), also for a drug no list names ("What is the dose of Testamol?");
 //  * in a conversation (prior: the earlier user turns) that named a medicine, it asks for an amount ("How much for
 //    a 15 kg toddler?" after a paracetamol question). A question only about water treatment is never one.
+// An explicit dose word: also a medicine the list does not name ("What is the dose of Testamol?"), so documents added
+// to the index later are found the same way. "How much water should I drink with a fever?" is not one.
+const DOSE_WORD = /\b(?:doses?|dosage|dosing|milligrams?|micrograms?|mg|mcg|mg\/kg)\b/i;
 export function medicineDoseQuestion(q, prior = []){
   q = String(q); const before = userTurns(prior);
   if (MED.test(q) && ASKS_AMOUNT.test(q)) return true;
   if (waterOnly(q)) return false;                       // "How many 16 mg iodine tablets per quart?", also after a medicine turn
-  return hasAlways(q) || (MED.test(before) && ASKS_AMOUNT.test(q));
+  return hasAlways(q) || DOSE_WORD.test(q) || (MED.test(before) && ASKS_AMOUNT.test(q));
 }
 // Sentences as [start, end): a break is . ! ? followed by a space or the end ("7.5 ml" is one sentence), or a line break.
 const sentenceSpans = t => { const out = [], re = /[.!?](?=\s|$)|\n/g; let s = 0, m;

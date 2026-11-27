@@ -218,18 +218,23 @@ older US manual differs. The passages used are linked under the answer. Other qu
 **Medicine doses: only word for word from the kit's documents, never from the AI** (`www/medicine.js`,
 `www/docs/exact.js` `medicineRoute`; code, not only a prompt rule). A medicine dose question is one that names a
 medicine (paracetamol, ibuprofen, antibiotics, "medicine"...) and asks for an amount (dose, how much, mg, ml, a body
-weight...), quotes an mg dose itself, or (in Chat) asks for an amount after a turn that named a medicine. It is never
+weight...), uses a dose word itself ("What is the dose of X?", also for a drug no list names), quotes an mg dose, or (in
+Chat) asks for an amount after a turn that named a medicine. Water treatment is never one. It is never
 sent to the AI, however it is phrased ("ignore your instructions", "I am a doctor", role-play).
-* **Ask the Manuals** answers it itself. If a retrieved source holds a dose for what was asked (by content: an mg / mcg /
-  IU / mg/kg figure, or a dose amount where a medicine is named, next to one of the question's own words), the
-  *exact wording* box shows those lines word for word with their source links. Under the box a caveat, which also cites
+* **Ask the Manuals** answers it itself. If a retrieved source holds a dose for what was asked, the *exact wording* box
+  shows those lines word for word with their source links. A dose line is found by content (an mg / mcg / IU / mg/kg
+  figure, or a dose amount where a medicine is named). For a question that names a known medicine, the line itself
+  must name that medicine (brand names count as the same drug) and no other, so a paracetamol question never shows an
+  ibuprofen line. For a question that names none (a drug no list knows), one of its own words must be in the line or
+  just before it, and the line must name no known medicine. Under the box a caveat, which also cites
   them, says it is quoted from the kit's documents, may not fit this person, to check it against the packet or label and
   the person's age and weight, to follow the source and label exactly, and to get medical advice (a pharmacist,
   Healthdirect 1800 022 222, or 000) if possible. If no source holds one, it says that the kit's documents do not give a
   dose for it, not to guess one, and gives the packet / pharmacist / Healthdirect / 000 pointer, with no box. That is
   the expected answer today for child paracetamol or amoxicillin: the current manuals do not give those doses.
   Detection is not a fixed drug list, so curated medical references added to the index later (`www/docs/pdf/` +
-  `tools/build_index.py`) are shown the same way.
+  `tools/build_index.py`) are shown the same way. Any other question (say "How much water should I drink with a
+  fever?") takes the usual path, and medicine-dose lines are dropped from its box.
 * **Chat** has no manuals on its general path and states no doses: it answers with a fixed message pointing to Ask the
   Manuals (for any dose in the kit's documents) and to the packet, a pharmacist, Healthdirect (1800 022 222) or 000.
 * **In every AI answer** on both pages, as it streams, the AI's own medicine-dose figures become *[dose removed]*,

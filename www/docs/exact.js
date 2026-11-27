@@ -29,7 +29,7 @@
 import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
 import {checkDoses, markSpans} from "./dose.js";
-import {medicineDoseQuestion, medicineDoseIn, doseSubjectWords, sourceDoseNote, NOT_COVERED} from "../medicine.js";
+import {medicineDoseQuestion, medicineDoseIn, medicinesIn, doseSubjectWords, sourceDoseNote, NOT_COVERED} from "../medicine.js";
 
 export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
@@ -152,23 +152,34 @@ export function renderAnswer(text, allowed, cite, exactShown){
 
 // ---- medicine doses: only word for word from the kit's documents, never from the AI (../medicine.js)
 // The excerpts of the box that hold a medicine dose (by content: any document, also one added to the index later) for
-// what the question asks about: one of its own words (the drug, or the condition) must be in the excerpt or in the
-// 300 characters of its source just before it. So a paracetamol question never shows an ibuprofen table.
+// what the question asks about:
+//  * the question names a known medicine: the excerpt itself must name that medicine (brand names count as the same
+//    drug) and no other. So a paracetamol question never shows an ibuprofen line, also when "paracetamol" or "fever"
+//    is in the text just before it;
+//  * it names none ("What is the dose of Testamol?", "dose of medicine for a fever"): one of its own words must be in
+//    the excerpt or the 300 characters of its source just before it, and the excerpt names no known medicine.
 export function medicineExcerpts(q, exact){
+  const named = medicinesIn(q);
   const words = doseSubjectWords(q).map(w => new RegExp(`\\b${w.replace(/[-]/g, "[- ]?")}`, "i"));
-  if (!words.length) return [];
+  if (!named.size && !words.length) return [];
   return exact.map(b => ({...b, excerpts: b.excerpts.filter(x => {
     if (!medicineDoseIn(x)) return false;
+    const inX = medicinesIn(x);
+    if (named.size) return [...inX].some(m => named.has(m)) && [...inX].every(m => named.has(m));
+    if (inX.size) return false;
     const at = b.hit.t.indexOf(x), ctx = at >= 0 ? b.hit.t.slice(Math.max(0, at - 300), at + x.length) : x;
     return words.some(w => w.test(ctx));
   })})).filter(b => b.excerpts.length);
 }
-// What Ask the Manuals shows for a medicine dose question, or for an amount question whose box holds a medicine dose,
-// without asking the AI. -> null (not a medicine dose: the usual path), or {box, text}:
+// The box without its medicine-dose excerpts: for every question that is not a medicine dose question, so the box
+// never shows a dose next to, say, a water question, and the AI (whose dose figures are removed) answers as usual.
+export const withoutMedicineDoses = exact => exact.map(b => ({...b, excerpts: b.excerpts.filter(x => !medicineDoseIn(x))})).filter(b => b.excerpts.length);
+// What Ask the Manuals shows for a medicine dose question (medicineDoseQuestion), without asking the AI. -> null (not a
+// medicine dose question: the usual path, with withoutMedicineDoses(exact) as the box), or {box, text}:
 //   box: the source passages holding the dose, shown word for word with their [n] links (renderExact); text: the caveat
 //   (sourceDoseNote), or with no such passage NOT_COVERED (the kit's documents do not give it + the safe pointer).
 export function medicineRoute(q, exact){
+  if (!medicineDoseQuestion(q)) return null;
   const box = medicineExcerpts(q, exact);
-  if (!box.length && !medicineDoseQuestion(q)) return null;
   return box.length ? {box, text: sourceDoseNote(box.map(b => b.n))} : {box: [], text: NOT_COVERED};
 }
