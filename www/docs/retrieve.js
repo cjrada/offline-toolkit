@@ -70,6 +70,13 @@ function startsWithMatch(c, qt){ // a query word in the first 150 characters: th
   return [...qt.keys()].some(t => qt.get(t) === 1 && head.has(t));
 }
 
+// How many characters of sources fit the model's context (tokens): the prompt must leave room for the
+// system prompt, question and source headers (~900 tokens at this rate) and the answer (max_tokens 700). Manual text with tables
+// and numbers tokenizes worse than prose, so this counts 2 characters per token (English prose is ~4):
+// 4096 -> ~5,000 characters, 8192 and up -> 9,000 (six sources with their neighbour chunks).
+export const ANSWER_TOKENS = 700, OVERHEAD_TOKENS = 900, CHARS_PER_TOKEN = 2;
+export const sourceBudget = ctx => Math.max(2000, Math.min(9000, Math.floor(((ctx || 4096) - ANSWER_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN)));
+
 // The top k sources for q: [{f, p, u, blob, t, first, last}], each one or more consecutive chunks of one page,
 // at most maxPerPage sources per page and about maxChars of text in all.
 export function search(ix, q, {k = 6, maxPerPage = 2, maxChars = 9000} = {}){
@@ -84,6 +91,7 @@ export function search(ix, q, {k = 6, maxPerPage = 2, maxChars = 9000} = {}){
     if (nb){ if (chars + c.t.length > maxChars) continue;
       if (nb.last === c.i - 1){ nb.t = joinText(nb.t, c.t); nb.last = c.i; } else { nb.t = joinText(c.t, nb.t); nb.first = c.i; }
       used.add(c.i); chars += c.t.length; continue; }
+    if (picked.length && chars + c.t.length > maxChars) continue;   // the budget (always at least one source)
     if ((perPage[key] = (perPage[key] || 0) + 1) > maxPerPage) continue;
     const s = {f: c.f, p: c.p, u: c.u, blob: c.blob, t: c.t, first: c.i, last: c.i};
     used.add(c.i); chars += c.t.length; picked.push(s);

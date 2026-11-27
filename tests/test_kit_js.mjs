@@ -8,7 +8,9 @@
 //    system prompt (answer only the question, quote quantities exactly, no snake-bite example)
 //  * if www/docs/index.js is a full built index (a kit build), the same check runs against it too
 //  * the "AI can make mistakes" notice (tools/ai-notice.json) is on the home, chat and manuals pages
-//  * www/chat/chat.js: kit system prompt, history trimming
+//  * www/chat/chat.js: kit system prompt, history trimming, "New chat" drops an answer still streaming
+//  * www/ai-status.js: status re-checked (3 s until ready, then 30 s); context from models.json
+//  * prompts fit a 4096-token context: sources and chat history are sized from the AI's ctx
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -20,8 +22,9 @@ const imp = rel => import(pathToFileURL(path.join(ROOT, rel)).href);
 const {renderMarkdown} = await imp("www/md.js");
 const R = await imp("www/docs/retrieve.js");
 const chat = await imp("www/chat/chat.js");
+const AS = await imp("www/ai-status.js");
 let failed = 0;
-function test(name, fn){ try { fn(); console.log("ok   " + name); } catch (e) { failed = 1; console.log("FAIL " + name + "\n     " + (e.message || e).split("\n").join("\n     ")); } }
+async function test(name, fn){ try { await fn(); console.log("ok   " + name); } catch (e) { failed = 1; console.log("FAIL " + name + "\n     " + (e.message || e).split("\n").join("\n     ")); } }
 
 // ---------------------------------------------------------------- markdown
 const TAGS = /<\/?([a-z0-9]+)/gi;
@@ -32,7 +35,7 @@ function onlyOurTags(html){
     assert.match(m[1], /^href="[^"]*" target="_blank" rel="noopener"$/, "link attributes: " + m[1]);
   for (const m of html.matchAll(/<(?!a )[a-z0-9]+ ([^>]*)>/gi)) assert.match(m[1], /^start="\d+"$/, "attributes: " + m[0]);
 }
-test("markdown: bold, italic, code, headings, lists, paragraphs", () => {
+await test("markdown: bold, italic, code, headings, lists, paragraphs", () => {
   const h = renderMarkdown("## Boil it\nUse **clean** water and *stir*.\nThen wait.\n\n- one\n- two `x`\n\n1. first\n2. second\n\nEnd __now__ _ok_");
   assert.equal(h, "<h4>Boil it</h4><p>Use <strong>clean</strong> water and <em>stir</em>.<br>Then wait.</p>" +
     "<ul><li>one</li><li>two <code>x</code></li></ul><ol><li>first</li><li>second</li></ol><p>End <strong>now</strong> <em>ok</em></p>");
@@ -40,7 +43,7 @@ test("markdown: bold, italic, code, headings, lists, paragraphs", () => {
   assert.equal(renderMarkdown("3. c"), '<ol start="3"><li>c</li></ol>');
   assert.equal(renderMarkdown("snake_case and 2*3*4"), "<p>snake_case and 2*3*4</p>");
 });
-test("markdown: model output cannot inject HTML, attributes or links", () => {
+await test("markdown: model output cannot inject HTML, attributes or links", () => {
   const evil = ['<script>alert(1)</script>', '<img src=x onerror=alert(1)>', '**<b onclick="x">hi</b>**',
     '[1](javascript:alert(1))', '[click](http://evil.example/)', '`<iframe src=//x>`', '" onmouseover="alert(1)',
     "<a href='javascript:alert(1)'>x</a>", '# <svg onload=alert(1)>', '- <style>*{}</style>', "\u0000<b>0</b>\u0000"];
@@ -54,7 +57,7 @@ test("markdown: model output cannot inject HTML, attributes or links", () => {
     '<p><a href="pdf/a&quot;b.pdf#page=3" target="_blank" rel="noopener">[2]</a> and [9]</p>');
   assert.equal(renderMarkdown("[1]"), "<p>[1]</p>", "no links without a cite function");
 });
-test("markdown: partial output while streaming stays sensible", () => {
+await test("markdown: partial output while streaming stays sensible", () => {
   assert.equal(renderMarkdown("Use **cle"), "<p>Use **cle</p>");
   assert.equal(renderMarkdown("Use `ble"), "<p>Use `ble</p>");
   assert.equal(renderMarkdown("- a\n- "), "<ul><li>a</li></ul><p>-</p>");
@@ -156,19 +159,19 @@ function oldSearch(chunks, q, k = 6){
   return out;
 }
 
-test("fixture: the chunker splits USMC p152 between '(b) Chlorine bleach' and its drops table (as in the kit)", () => {
+await test("fixture: the chunker splits USMC p152 between '(b) Chlorine bleach' and its drops table (as in the kit)", () => {
   const usmc = all.filter(c => c.f.startsWith("USMC") && c.p === 152);
   assert.equal(usmc.length, 2);
   assert.match(usmc[0].t, /\(b\) Chlorine bleach\. The strength of the solution, number of$/); assert.doesNotMatch(usmc[0].t, /GTTS/);
   assert.match(usmc[1].t, /GTTS/);
 });
-test("fixture reproduces the bug: the old retrieval sends 'bleach' but no quantity for the water question", () => {
+await test("fixture reproduces the bug: the old retrieval sends 'bleach' but no quantity for the water question", () => {
   const old = oldSearch(all, Q);
   assert.ok(old.some(c => /bleach/i.test(c.t)), "old top 6 mention bleach");
   assert.ok(!old.some(c => QUANTITY.test(c.t)), "old top 6 had a quantity: " + old.map(c => c.f + " " + c.p).join("; "));
 });
 const ix = R.createIndex(all.map(c => ({...c})));
-test("retrieval: 'make water safe to drink' now gets passages with the actual bleach quantities", () => {
+await test("retrieval: 'make water safe to drink' now gets passages with the actual bleach quantities", () => {
   const hits = R.search(ix, Q);
   assert.ok(hits.length <= 6);
   const ctx = hits.map(h => h.t).join("\n");
@@ -182,11 +185,11 @@ test("retrieval: 'make water safe to drink' now gets passages with the actual bl
   assert.ok(ctx.length <= 9000 + 900);
 });
 for (const q of ["How do I purify water?", "water purification", "purifying drinking water", "Is the creek water drinkable?", "how much bleach for water"]){
-  test(`retrieval: "${q}" reaches a bleach / iodine quantity`, () => {
+  await test(`retrieval: "${q}" reaches a bleach / iodine quantity`, () => {
     assert.match(R.search(ix, q).map(h => h.t).join("\n"), QUANTITY);
   });
 }
-test("retrieval: stemming and query expansion", () => {
+await test("retrieval: stemming and query expansion", () => {
   for (const w of ["purify", "purified", "purifying", "purification", "purifies"]) assert.equal(R.stem(w), "purif");
   for (const [a, b] of [["drinking", "drink"], ["boiled", "boil"], ["disinfection", "disinfect"], ["disinfectant", "disinfect"], ["drops", "drop"]])
     assert.equal(R.stem(a), b);
@@ -195,11 +198,11 @@ test("retrieval: stemming and query expansion", () => {
   assert.equal(t.get("bleach"), R.EXPAND_WEIGHT); assert.equal(t.get("purif"), R.EXPAND_WEIGHT);
   assert.equal(R.queryTerms("How do I treat a boil on my arm?").get("bleach"), undefined, "no water words, no expansion");
 });
-test("retrieval: snake bite still finds the Australian snake-bite note in the top two", () => {
+await test("retrieval: snake bite still finds the Australian snake-bite note in the top two", () => {
   const h = R.search(ix, "How do I treat a snake bite?");
   assert.ok(h.slice(0, 2).some(x => x.f === NOTES && /Snake bite/.test(x.p)), h.map(x => x.p).join("; "));
 });
-test("retrieval: user-added PDFs (blob) and notes keep their own pages; at most 2 sources per page", () => {
+await test("retrieval: user-added PDFs (blob) and notes keep their own pages; at most 2 sources per page", () => {
   const extra = [{f: "x.pdf", p: 1, t: "alpha bravo charlie ".repeat(10), blob: "blob:1"}, {f: "x.pdf", p: 1, t: "delta echo alpha ".repeat(10), blob: "blob:1"},
     {f: "x.pdf", p: 2, t: "alpha zulu ".repeat(10), blob: "blob:1"}];
   const i2 = R.createIndex([...extra]);
@@ -207,7 +210,7 @@ test("retrieval: user-added PDFs (blob) and notes keep their own pages; at most 
   assert.equal(h.length, 2); assert.equal(h[0].blob, "blob:1");
   assert.equal(h.filter(x => x.p === 1).length, 1, "consecutive chunks of page 1 merged into one source");
 });
-test("prompt: no snake-bite example; only the question; quantities quoted exactly or 'no amount'", () => {
+await test("prompt: no snake-bite example; only the question; quantities quoted exactly or 'no amount'", () => {
   const p = R.SYSTEM_PROMPT;
   assert.doesNotMatch(p, /snake|tourniquet|constricting/i);
   assert.match(p, /Answer ONLY the question asked/);
@@ -227,7 +230,7 @@ test("prompt: no snake-bite example; only the question; quantities quoted exactl
 const IDX = path.join(ROOT, "www/docs/index.js");
 const real = fs.existsSync(IDX) ? (() => { const sb = {window: {}}; vm.runInNewContext(fs.readFileSync(IDX, "utf8"), sb); return sb.window.DOCS_INDEX; })() : null;
 if (real && real.chunks.length > 1000) {
-  test("real index: 'make water safe to drink' gets passages with bleach quantities", () => {
+  await test("real index: 'make water safe to drink' gets passages with bleach quantities", () => {
     const h = R.search(R.createIndex(real.chunks.map(c => ({...c}))), Q);
     assert.match(h.map(x => x.t).join("\n"), QUANTITY, h.map(x => `${x.f} ${x.p}`).join("; "));
   });
@@ -236,7 +239,7 @@ if (real && real.chunks.length > 1000) {
 // ---------------------------------------------------------------- notice + chat page
 const notice = JSON.parse(fs.readFileSync(path.join(ROOT, "tools/ai-notice.json"), "utf8"));
 const box = k => `<p class="warn ai-notice" role="note">${notice[k]}</p>`;
-test("notice text says the three things", () => {
+await test("notice text says the three things", () => {
   for (const k of ["sources", "chat"]){
     assert.match(notice[k], /^<b>AI can make mistakes\.<\/b> Always cross-check answers /);
     assert.match(notice[k], /Sources can be wrong or out of date too, but they're far more reliable than the AI alone\.$/);
@@ -245,21 +248,21 @@ test("notice text says the three things", () => {
   assert.match(notice.chat, /against the Library or the manuals/);
 });
 const page = rel => fs.readFileSync(path.join(ROOT, rel), "utf8");
-test("notice on Ask the Manuals, next to the answer (visible before and after an answer)", () => {
+await test("notice on Ask the Manuals, next to the answer (visible before and after an answer)", () => {
   const h = page("www/docs/index.html");
   assert.equal(h.split(box("sources")).length, 2);
   const i = h.indexOf(box("sources"));
   assert.ok(i > h.indexOf('<form id="f"') && i < h.indexOf('<div id="answer"'), "between the question box and the answer");
   assert.doesNotMatch(h.slice(h.indexOf("ai-notice") - 200, i), /<details/, "not inside a collapsible");
 });
-test("notice on the kit home page; the Chat tile opens the kit chat page", () => {
+await test("notice on the kit home page; the Chat tile opens the kit chat page", () => {
   const h = page("www/index.html");
   assert.ok(h.includes(box("sources")));
   assert.match(h, /<a class="tile" href="chat\/"><h2>Chat<\/h2>/);
   assert.doesNotMatch(h, /\bstatus\.textContent/, "bare `status` is window.status, not the element");
   assert.match(h, /document\.getElementById\("aiStatus"\)/);
 });
-test("notice on the chat page, pinned above the conversation", () => {
+await test("notice on the chat page, pinned above the conversation", () => {
   const h = page("www/chat/index.html");
   assert.ok(h.includes(`<div class="notice-bar">${box("chat")}</div>`));
   assert.ok(h.indexOf("notice-bar") < h.indexOf('id="log"'));
@@ -267,7 +270,7 @@ test("notice on the chat page, pinned above the conversation", () => {
   assert.match(h, /<script type="module" src="chat\.js"><\/script>/);
   assert.doesNotMatch(h, /https?:\/\//, "no external URLs");
 });
-test("chat: kit system prompt and history trimming", () => {
+await test("chat: kit system prompt and history trimming", () => {
   const p = chat.SYSTEM_PROMPT;
   for (const s of [/offline emergency assistant/, /practical, safe/, /never suggest anything unusual, improvised or dangerous/,
     /not sure, say so/, /call 000/, /Do not give medication doses/, /wild plant, berry or mushroom/]) assert.match(p, s);
@@ -280,7 +283,74 @@ test("chat: kit system prompt and history trimming", () => {
   assert.ok(m.slice(1).reduce((n, x) => n + x.content.length, 0) <= 6000);
   assert.equal(chat.messages([{role: "user", content: "x".repeat(9000)}]).length, 2, "one long question is still sent");
 });
-test("pages use md.js / retrieve.js, no CDN or remote scripts", () => {
+await test("chat: 'New chat' while an answer streams drops that answer (no stray AI turn in the new chat)", () => {
+  let stored = null; const store = {get: () => stored, set: v => { stored = v; }};
+  const s1 = chat.createSession(store);
+  const t1 = s1.ask("first?");
+  assert.equal(s1.finish(t1, "answer one"), true);
+  const t2 = s1.ask("second?");            // streaming...
+  s1.clear();                              // "New chat" pressed; the old stream then ends (aborted, partial text)
+  assert.equal(s1.finish(t2, "partial *(stopped)*"), false);
+  assert.deepEqual(s1.history, []);
+  assert.deepEqual(JSON.parse(stored), [], "nothing left in sessionStorage");
+  assert.deepEqual(chat.createSession(store).history, [], "reload: no stray AI bubble");
+  const t3 = s1.ask("new question");
+  assert.equal(s1.finish(t3, "new answer"), true);
+  assert.deepEqual(s1.history.map(m => m.role), ["user", "assistant"]);
+  const t4 = s1.ask("no answer came");
+  s1.finish(t4, "");
+  assert.deepEqual(s1.history.map(m => m.content), ["new question", "new answer"], "an unanswered question is removed");
+  stored = "{bad json"; assert.deepEqual(chat.createSession(store).history, []);
+  stored = '{"not":"a list"}'; assert.deepEqual(chat.createSession(store).history, []);
+});
+await test("AI status: ready / loading (503) / down, re-checked every 3 s until ready, then every 30 s", async () => {
+  const replies = [new Error("refused"), {ok: false, status: 503, body: {error: {code: 503}}}, {ok: true, body: {status: "ok"}}];
+  let i = 0, url = "";
+  const fetchFn = async u => { url = u; const r = replies[Math.min(i++, replies.length - 1)]; if (r instanceof Error) throw r;
+    return {ok: r.ok, status: r.status || 200, json: async () => r.body}; };
+  const el = {textContent: "", dataset: {}}, timers = [];
+  const stop = AS.watchAI(el, "http://192.168.1.5", {fetchFn, setTimer: (f, ms) => timers.push([f, ms])});
+  const step = async () => { for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r)); };
+  await step(); assert.equal(el.textContent, "AI: starting / not running"); assert.equal(timers.at(-1)[1], 3000);
+  assert.equal(url, "http://192.168.1.5:8080/health", "same host as the page (LAN mode)");
+  timers.at(-1)[0](); await step(); assert.equal(el.textContent, "AI: loading…"); assert.equal(timers.at(-1)[1], 3000);
+  timers.at(-1)[0](); await step(); assert.equal(el.textContent, "AI: ready"); assert.equal(timers.at(-1)[1], 30000);
+  stop(); const n = timers.length; timers.at(-1)[0](); await step(); assert.equal(timers.length, n, "stopped");
+  for (const f of ["www/index.html", "www/chat/chat.js"]) assert.match(page(f), /watchAI\(/, f + " polls with watchAI");
+  assert.equal(await AS.aiContext("m", async () => ({json: async () => ({ctx: 8192})})), 8192);
+  assert.equal(await AS.aiContext("m", async () => { throw new Error("x"); }), 4096, "unknown ctx -> 4096");
+  assert.equal(await AS.aiContext("m", async () => ({json: async () => ({})})), 4096);
+});
+await test("context budget: manuals prompt and chat history fit a 4096-token context with the answer", () => {
+  // Estimate: 2 characters per token for the whole prompt (prose is ~4; tables and numbers are worse than prose,
+  // so this is deliberately pessimistic), + the answer's max_tokens, + 50 tokens of chat-template markup.
+  const tokens = msgs => Math.ceil(msgs.reduce((n, m) => n + m.content.length, 0) / R.CHARS_PER_TOKEN) + 50;
+  assert.equal(R.sourceBudget(8192), 9000); assert.equal(R.sourceBudget(32768), 9000);
+  assert.ok(R.sourceBudget(4096) <= 6000 && R.sourceBudget(4096) >= 4500, String(R.sourceBudget(4096)));
+  assert.equal(R.sourceBudget(undefined), R.sourceBudget(4096));
+  const many = [Q, "How do I treat a snake bite?", "bushfire smoke shelter food water burn", "How do I purify water?",
+    fw.join(" "), "splint fracture bandage shelter fire signal"];
+  for (const ctx of [4096, 8192]) for (const q of many) {
+    const hits = R.search(ix, q, {maxChars: R.sourceBudget(ctx)});
+    const chars = hits.reduce((n, h) => n + h.t.length, 0);
+    assert.ok(chars <= R.sourceBudget(ctx), `${q} @${ctx}: ${chars} chars of sources`);
+    const used = tokens(R.buildMessages(q, hits, c => "FM 21-76 US Army Survival Manual (public domain)", c => "page 227")) + R.ANSWER_TOKENS;
+    assert.ok(used <= ctx, `${q} @${ctx}: ~${used} tokens > ${ctx}`);
+  }
+  // the water question still gets its quantities at 4096
+  assert.match(R.search(ix, Q, {maxChars: R.sourceBudget(4096)}).map(h => h.t).join("\n"), QUANTITY);
+  // chat: history budget by ctx
+  const hist = Array.from({length: 40}, (_, i) => ({role: i % 2 ? "assistant" : "user", content: "x".repeat(700)}));
+  for (const ctx of [4096, 8192]) {
+    const m = chat.messages(hist, chat.historyBudget(ctx));
+    assert.ok(tokens(m) + chat.ANSWER_TOKENS <= ctx, `chat @${ctx}`);
+  }
+  assert.ok(chat.historyBudget(8192) > chat.historyBudget(4096));
+  assert.match(page("www/docs/rag.js"), /search\(ix, q, \{maxChars: sourceBudget\(ctx\)\}\)/);
+  assert.match(page("www/docs/rag.js"), /aiContext\("\.\.\/models\.json"\)/);
+  assert.match(page("www/chat/chat.js"), /historyBudget\(await aiContext\("\.\.\/models\.json"\)\)/);
+});
+await test("pages use md.js / retrieve.js, no CDN or remote scripts", () => {
   for (const f of ["www/index.html", "www/docs/index.html", "www/chat/index.html"])
     for (const [, src] of page(f).matchAll(/<script[^>]*src="([^"]+)"/g)) assert.doesNotMatch(src, /^(https?:)?\/\//, f + " " + src);
   assert.match(page("www/docs/rag.js"), /from "\.\.\/md\.js"/);

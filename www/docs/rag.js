@@ -1,7 +1,8 @@
 // Offline RAG: BM25 keyword retrieval in the browser (retrieve.js) + local LLM (llamafile, OpenAI-compatible API).
 // Answers are rendered with md.js: escaped first, then a small markdown subset; [n] links to source n.
-import {createIndex, search, buildMessages} from "./retrieve.js";
+import {createIndex, search, buildMessages, sourceBudget, ANSWER_TOKENS} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
+import {aiContext} from "../ai-status.js";
 const LLM = `${location.protocol}//${location.hostname}:8080/v1/chat/completions`;
 
 let chunks = [], docs = {}, ix = createIndex([]);
@@ -46,7 +47,9 @@ $("add").onchange = async e => {
 // ---- ask ----
 $("f").onsubmit = async e => {
   e.preventDefault(); const q = $("q").value.trim(); if(!q) return;
-  const hits = search(ix, q);
+  // Sources sized to the context the AI runs with now (models.json; 4096 if unknown), so the prompt fits.
+  const ctx = await aiContext("../models.json");
+  const hits = search(ix, q, {maxChars: sourceBudget(ctx)});
   $("srcH").hidden = false;
   $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
@@ -54,7 +57,7 @@ $("f").onsubmit = async e => {
   const out = $("answer"); out.textContent = "Thinking… (first answer on a slow laptop can take a minute)";
   try {
     out.classList.add("md");
-    const r = await fetch(LLM, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages, stream:true, temperature:0.1, max_tokens:700})});
+    const r = await fetch(LLM, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages, stream:true, temperature:0.1, max_tokens:ANSWER_TOKENS})});
     if (!r.ok) throw new Error(r.status === 503 ? "the model is still loading" : "HTTP " + r.status);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "", txt = "";
     for(;;){ const {done,value} = await rd.read(); if(done) break; buf += dec.decode(value,{stream:true});

@@ -21,22 +21,12 @@
 </details>
 <p class="small">Phone access: if the kit was started with LAN mode, open <code>http://&lt;this-laptop-IP&gt;:8000</code> on a phone on the same Wi-Fi/hotspot.</p>
 </main>
-<script>
-// Library link on this host (works in LAN mode too) and the AI status. Note: the element is looked up by id;
-// a bare global "status" would be window.status (a legacy string property), not the span.
-const h = location.hostname, p = location.protocol, aiStatus = document.getElementById("aiStatus");
-document.getElementById("lib").href = `${p}//${h}:8081/`;
-async function checkAI(){
-  let state = "not running";
-  try {
-    const r = await fetch(`${p}//${h}:8080/health`, {cache: "no-store"});
-    const j = await r.json().catch(() => ({}));
-    state = r.ok && j.status === "ok" ? "ready" : "loading…";   // llama.cpp answers 503 while the model loads
-  } catch { state = "starting / not running"; }
-  aiStatus.textContent = "AI: " + state;
-  aiStatus.className = "small ai-" + state.split(/[ /…]/)[0];
-  setTimeout(checkAI, state === "ready" ? 30000 : 3000);
-}
-checkAI();
+<script type="module">
+// Library link on this host (works in LAN mode too) and the AI status (ai-status.js: re-checked every 3 s
+// until ready, then every 30 s). The span is looked up by id: a bare global "status" is window.status.
+import {watchAI} from "./ai-status.js";
+const base = `${location.protocol}//${location.hostname}`;
+document.getElementById("lib").href = `${base}:8081/`;
+watchAI(document.getElementById("aiStatus"), base);
 </script>
 <script src="models.js"></script></body></html>
