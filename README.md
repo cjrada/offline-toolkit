@@ -53,6 +53,11 @@ kits), donations are welcome but entirely optional; the addresses are in the
   First run: Windows SmartScreen / Defender may ask about `llamafile.exe`, `kiwix-serve.exe`, `miniserve.exe` -
   choose *More info -> Run anyway*; allow the firewall prompt only if you want LAN/phone access.
 * **Linux:** `sh start.sh` (or `sh start.sh lan`). Ctrl+C or `sh stop.sh` to stop.
+  `stop.sh` stops only this kit: it asks this kit's launcher to exit (PID file per user and kit folder,
+  checked to still be a `start.sh`), then stops leftovers whose command line names this kit folder
+  (`bin/llamafile.exe`, `www/`, `library/`), so another kit copy or your own llamafile / kiwix-serve /
+  miniserve keeps running. `stop.bat` likewise stops only programs whose `.exe` is inside the kit folder;
+  `stop.bat all` stops every llamafile / llama-server / kiwix-serve / miniserve (the old behaviour).
   Works even if the drive is mounted `noexec` (it runs llamafile via `sh` and copies the two small static binaries to /tmp).
 * Then open <http://localhost:8000/>. The AI needs ~10-60 s to load (longer from a slow USB stick).
 * **The model is picked automatically.** Each tier bundles several sizes (small: 1.7B + 4B; medium adds 8B
@@ -98,7 +103,7 @@ kits), donations are welcome but entirely optional; the addresses are in the
   otherwise). See *Troubleshooting*.
 * **One copy at a time.** `start.bat` refuses to start while the kit, or any llamafile / llama-server, is
   already running (Windows lets a second AI server listen on port 8080 next to the first, without an error).
-  Run `stop.bat` first; it stops those engines too.
+  Run `stop.bat` first; if the engine is not the kit's (`stop.bat` leaves those alone), close it or run `stop.bat all`.
 * **Automatic CPU fallback.** If the AI exits by itself while it is using the GPU, or is still not answering
   `/health` after 60 s + 1 s per 50 MB of model (`HEALTH_TIMEOUT=` to change) while a GPU is in use, the
   launcher restarts it once with `--gpu disable`, re-picking the model for RAM (the GPU-sized one may not fit), and prints one
@@ -125,8 +130,8 @@ kits), donations are welcome but entirely optional; the addresses are in the
   (`llamafile-gpu.log` for a failed GPU attempt). On Windows: `%TEMP%\offline-kit-ai.log` (the current AI)
   and `%TEMP%\offline-kit-ai.crash.log` (the last one that stopped, with its exit code).
 * **"The Offline Kit or an AI engine (llamafile / llama-server) is already running".** Open
-  <http://localhost:8000/> if it is the kit, or run `stop.bat` (it also stops a stray llamafile / llama-server)
-  and then `start.bat`.
+  <http://localhost:8000/> if it is the kit, or run `stop.bat` and then `start.bat`. A stray llamafile /
+  llama-server that is not the kit's: close it, or run `stop.bat all` (stops every one of them).
 * **OBS Studio installed (Windows).** OBS registers an implicit Vulkan layer (`VK_LAYER_OBS_HOOK`,
   `C:\ProgramData\obs-studio-hook\obs-vulkan64.json`) that crashes llamafile 0.10.6's Vulkan init with
   0xC0000005, even at `-ngl 1`. The launchers set `DISABLE_VULKAN_OBS_CAPTURE=1` and
@@ -196,20 +201,38 @@ manuals out of the pinned zimgit ZIMs). Prebuilt kits are
 published to Google Cloud Storage by the manually started `publish-kit` workflow. See
 [docs/SETUP.md](docs/SETUP.md) for the security model, one-time GCP/GitHub setup and costs.
 
+### Chat
+The home page's **Chat** tile opens the kit's own chat page (`www/chat/`), a small client for llamafile's
+OpenAI-compatible API on port 8080 (same host, so LAN mode works). It keeps an *"AI can make mistakes. Always
+cross-check answers against the Library or the manuals..."* notice pinned on screen, and sends a short kit system
+prompt (offline emergency assistant; practical and safe, no odd or unsafe suggestions; say when unsure; call 000
+in Australia; no medication doses or wild-food identification). Replies use the same safe markdown as Ask the
+Manuals. llamafile's own chat page (port 8080) is still linked from there for its extra settings; it shows
+neither the notice nor the kit prompt (its system message is a per-browser setting in that page).
+The notice text lives in `tools/ai-notice.json` and is shared by the home, chat and manuals pages and the
+downloads site.
+
 ### Ask the Manuals (RAG) - how it works
 Python-free at run time. `www/docs/index.js` holds ~2,200 pre-chunked passages from the PDFs. The page does
-BM25 keyword search in the browser, sends the top 6 passages to the local model with strict "answer only from
-these sources, cite [n]" instructions, and shows every citation as a link that opens the exact PDF page.
+BM25 keyword search in the browser (`www/docs/retrieve.js`: light stemming, so purify / purifying /
+purification match, and a "safe / drinkable water" question also looks for bleach, boiling, chlorine and iodine
+passages), sends the top 6 sources to the local model, each with the next passage of its page (a table is often
+split across two passages; all sources together are sized to the context the AI runs with (llama.cpp `/props`, else `models.json`): ~4,750
+characters at 4096, 9,000 at 8192 and up), and tells it to answer only the question asked, only from these sources, citing
+[n], and to quote any dose or quantity exactly as the source states it (or say that no source gives one).
+Answers render a small, safe markdown subset (`www/md.js`: bold, italics, lists, headings, code; model output
+is escaped first, and the only links are the [n] citations, each opening the exact PDF page). A notice next to
+the answer says the AI can make mistakes and to cross-check the linked sources.
 Seeded with: FM 21-76 US Army Survival Manual; FM 4-25.11 First Aid (2002); USMC Wilderness Medicine Course;
 Ready.gov/FEMA "Are You Ready?"; Washington State DoH "Purifying Water During an Emergency"; and
 `notes/Australia-first-aid-and-emergency-notes.txt` (kit-written summary of Australian practice - 000, snake bite
-pressure-immobilisation, box jellyfish vinegar, etc.). The Australian notes are boosted and the model is told they
-override the older US manuals (the 2002 US Army manual recommends a *constricting band* for snake bite, which is
-**wrong for Australia**).
+pressure-immobilisation, box jellyfish vinegar, etc.). The Australian notes are boosted and the model is told to
+follow them where they and an older US manual disagree (the 2002 US Army manual recommends a *constricting band*
+for snake bite, which is **wrong for Australia**).
 
 Add documents:
 * **Any OS, no tools:** Ask-the-Manuals -> "add your own PDFs" (parsed in-browser with pdf.js, stored in that browser only).
-* **Bake into the drive:** copy PDFs to `www/docs/pdf/` (titles in `pdf/titles.json`), text notes to `www/docs/notes/`,
+* **Bake into the drive:** copy PDFs to `www/docs/pdf/` (titles in `tools/pdf-titles.json`, kept out of the PDF shelf), text notes to `www/docs/notes/`,
   then run `python3 tools/build_index.py`.
 
 ### Maps

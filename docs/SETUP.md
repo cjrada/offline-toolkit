@@ -330,6 +330,12 @@ Order, each step only after the previous one succeeded (`tools/publish_r2.py`):
 small and a medium publish at the same time cannot hide one from the page) and writes one plain HTML page: the latest kit of each tier with version, date,
 size, sha256 and links to the zip and `.sha256`, the previous versions still kept, size warnings, and a link
 to this repository. publish-kit calls it after each real publish; run it by hand to rebuild the page.
+Below the downloads, a **What to expect** section shows the kit's "AI can make mistakes" notice (text from
+`tools/ai-notice.json`, shared with the kit's own pages), a gallery of the screenshots in `site/screenshots/`
+(1440x900 WebP; `build_site.py` copies them into `--out/screenshots/`, so the page stays self-hosted and the
+upload of the whole `--out` folder needs no workflow change), and measured speed / hardware notes. `site/` is
+for the website only: `tools/build_kit.py` never packs it into a kit. To change a screenshot, replace the file
+and its alt text / caption in `SCREENSHOTS` in `tools/build_site.py`.
 
 ## 4. Updating the manifest
 

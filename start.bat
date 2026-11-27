@@ -332,7 +332,7 @@ exit /b 0
 
 :already_running
 echo The Offline Kit or an AI engine (llamafile / llama-server) is already running.
-echo If it is the kit, open http://localhost:8000/ - to restart, run stop.bat first (it also stops
-echo those engines), then start.bat again.
+echo If it is the kit, open http://localhost:8000/ - to restart, run stop.bat first, then start.bat again.
+echo If it is another llamafile / llama-server, close it, or run "stop.bat all" (stops every one of them).
 pause
 exit /b 1

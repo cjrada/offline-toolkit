@@ -47,7 +47,10 @@ CTL="$TMPD/offline-toolkit-control-$(id -u)"   # model-switch requests land here
 # required as the first line of every switch request, so a page on another site cannot switch models.
 SWITCH_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -dc '0-9a-f')
 export SWITCH_TOKEN
-PIDFILE="$TMPD/offline-toolkit-$(id -u).pid"; echo $$ >"$PIDFILE"
+# The launcher's PID, for stop.sh. Keyed by user and by this kit's folder, so two kits (or two users) never
+# share it. stop.sh checks the PID still belongs to a start.sh before signalling it.
+KIT_ID=$(printf '%s' "$KIT" | cksum | cut -d' ' -f1)
+PIDFILE="$TMPD/offline-toolkit-$(id -u)-$KIT_ID.pid"; echo $$ >"$PIDFILE"
 cleanup(){ echo; echo "Stopping..."; kill $PIDS $LLM_PID 2>/dev/null; rm -rf "$CTL" "$PIDFILE"; exit 0; }
 trap cleanup INT TERM
 
@@ -134,11 +137,12 @@ llm_check_ready(){
 }
 start_llm
 
-ZIMS=$(ls library/*.zim 2>/dev/null)
-if [ -n "$ZIMS" ]; then
+# Absolute ZIM paths (also when the folder has spaces): stop.sh recognises this kit's kiwix-serve by them,
+# even when it runs from the shared $TMPDIR/offline-toolkit-bin copy.
+set -- "$KIT"/library/*.zim
+if [ -e "$1" ]; then
   echo "Starting library (Kiwix)..."
-  # shellcheck disable=SC2086
-  "$BIN/kiwix-serve" --address="$BIND" --port=8081 $ZIMS >"$LOG/kiwix.log" 2>&1 &
+  "$BIN/kiwix-serve" --address="$BIND" --port=8081 "$@" >"$LOG/kiwix.log" 2>&1 &
   PIDS="$PIDS $!"
 fi
 

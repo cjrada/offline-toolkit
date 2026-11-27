@@ -12,3 +12,10 @@ input#q{width:60%;padding:.5em;font-size:1em} button{padding:.5em 1em;font-size:
 .models{width:100%;border-collapse:collapse;background:#fff;border-radius:6px;font-size:.92em}
 .models td,.models th{padding:.35em .5em;border-bottom:1px solid #eee;text-align:left}
 .fit-gpu,.fit-ram{color:#2d6a1f} .fit-tight{color:#8a5a00} .fit-too-big{color:#a11}
+.answer.md{white-space:normal} .answer.md p{margin:.4em 0} .answer.md ul,.answer.md ol{margin:.4em 0;padding-left:1.6em}
+.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{margin:.6em 0 .3em;font-size:1.05em} .answer code{background:#f1efe8;padding:0 .2em;border-radius:3px}
+.ai-notice{font-size:1em;margin:1em 0} .ai-notice b{color:#5c4400}
+header .small{color:#dfe8c8;margin-left:auto}
+.notice-bar{position:sticky;top:0;z-index:1;background:#f6f4ef;padding:.5em 1em 0} .notice-bar .ai-notice{max-width:900px;margin:0 auto .3em;box-sizing:border-box}
+.chatlog .msg{margin:.8em 0} .chatlog .who{font-size:.8em;color:#555} .chatlog .msg.user .body{background:#e8eddf}
+.chatlog .body{margin:.2em 0} .chatform textarea{width:100%;box-sizing:border-box;padding:.5em;font:inherit} .chatform div{margin-top:.4em}
