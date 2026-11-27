@@ -77,6 +77,7 @@ const UNITS = [[/^(drops?|gtts?|gts)$/, "drop"], [/^(tsp|teaspoon)/, "tsp"], [/^
   [/^sec/, "s"], [/^(°c|degreesc|degreescelsius)$/, "°c"], [/^(°f|degreesf|degreesfahrenheit)$/, "°f"], [/^degree/, "deg"]];
 const unit = u => { u = u.toLowerCase().replace(/\s+/g, ""); for (const [re, c] of UNITS) if (re.test(u)) return c; return u; };
 const k = n => String(Math.round(n * 10000) / 10000);
+const VOLUME = new Set(["quart", "gallon", "l", "pint", "cup"]);   // water volumes in a dosing table (not ml: doses are given in ml)
 export const TIME_UNITS = new Set(["min", "h", "s", "°c", "°f", "deg"]);
 // {nums: [n] or [a, b], u, tail: [n, unit] or null}
 export function parseFigure(g){
@@ -100,10 +101,16 @@ function figuresIn(text){
       return {key, parts, u: f.u, start: m.index, end: m.index + m[0].length};
     });
     // A table row, also when the table is flattened to one line: the amount right after its volume, nothing but spaces
-    // or "/" between ("1 quart/1 liter 5 drops", "1 gallon 1/4 teaspoon"). Only the figure just before the amount counts,
-    // with the figures joined to it by "/" ("1/2 gallon/2 quarts/2 liters 10 drops"), never one in the amount's own unit.
+    // or "/" between ("1 quart/1 liter 5 drops", "1 gallon 1/4 teaspoon"). Only for a table laid out volume first: the
+    // run of figures (joined by spaces or "/") must start with a water volume. Then the amount (not a volume) pairs with
+    // the figure just before it and the figures joined to it by "/" ("1/2 gallon/2 quarts/2 liters 10 drops"), never one
+    // in the amount's own unit. An amount-first table ("8 drops 1 gallon 1/2 teaspoon 5 gallons") pairs nothing.
+    const joined = (a, b) => /^[\s\/]{0,3}$/.test(line.slice(a.end, b.start));
+    let runStart = 0;
     ms.forEach((m, j) => {
-      for (let i = j - 1, end = m.start; i >= 0 && ms[i].u !== m.u &&
+      if (j === 0 || !joined(ms[j - 1], m)) runStart = j;
+      if (!VOLUME.has(ms[runStart].u) || VOLUME.has(m.u)) return;
+      for (let i = j - 1, end = m.start; i >= runStart && ms[i].u !== m.u &&
            (i === j - 1 ? /^[\s\/]{0,3}$/ : /^\s?\/\s?$/).test(line.slice(ms[i].end, end)); end = ms[i].start, i--)
         for (const p of ms[i].parts) adjacent.add(m.key + " | " + p);
     });
@@ -115,8 +122,9 @@ let memo = ["", null];
 // Is this figure (a regexp match's groups) in the text, as the same number(s) and unit, however written? A "per" figure
 // ("5 drops per quart") counts if the source states it, or as a table row:
 //  * a line of the text (a real line break, not a sentence) whose only figure in each of the two units is that one; or
-//  * the amount directly after the volume figure(s), with only spaces or "/" between ("1 quart/1 liter 5 drops"). This
-//    also works on a table flattened to one line (PDFs added in the browser) without pairing figures from other rows.
+//  * the amount directly after the volume figure(s), with only spaces or "/" between ("1 quart/1 liter 5 drops"), in a
+//    table laid out volume first. This also works on a table flattened to one line (PDFs added in the browser) without
+//    pairing figures from other rows; an amount-first table pairs nothing this way (safe: such figures are removed).
 export function figureInText(g, text){
   if (memo[0] !== text) memo = [text, figuresIn(text)];
   const F = memo[1], f = parseFigure(g), head = f.nums.map(n => atom(n, f.u));

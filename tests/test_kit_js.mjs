@@ -380,6 +380,11 @@ await test("exact: the model is told not to write figures; an invented '20 drops
     assert.equal(E.guardFigures(ok, flatWA).removed, 0, "flattened: " + ok);
   for (const bad of ["5 drops per 1/2 gallon", "1/4 teaspoon per 5 gallons", "2 teaspoons per 5 gallons"])
     assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened, next row: " + bad);
+  // an amount-first table flattened to one line ("Bleach | Water"): never pair a row's amount with the next row's volume
+  const amountFirst = "Bleach Water 8 drops 1 gallon 1/2 teaspoon 5 gallons";
+  for (const bad of ["1/2 teaspoon per gallon", "1/2 teaspoon per 1 gallon", "8 drops per 5 gallons"])
+    assert.equal(E.guardFigures(bad, amountFirst).removed, 1, "amount first: " + bad);
+  assert.equal(E.guardFigures("1/2 teaspoon", amountFirst).removed, 0, "the figure itself is in the source");
   // the browser-added version of both pages (rag.js chunkText collapses all whitespace)
   const flat = WATER.map(w => w.t.replace(/\s+/g, " ")).join("\n");
   for (const bad of ["10 drops per quart", "20 drops per gallon", "add 10 drops of bleach per gallon", "4 drops per quart"])
