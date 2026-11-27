@@ -181,7 +181,10 @@ jobs that pass the environment's approval and branch/tag rules. The workflow cod
   job's result and the outcome, plus the Cloud Build link (medium/large) and, after a publish, the **public
   R2 download links** for the zip, its `.sha256`, `KIT-INFO.json` and `<tier>/latest.json`, and a link to
   the downloads page <https://cjrada.github.io/offline-toolkit/>. No sign-in is needed for any of them.
-  The `pages` job rebuilds the downloads page a minute after the publish job.
+  The `pages` job rebuilds the downloads page a minute after the publish job (it retries the deploy once by
+  itself). If it still fails, the kit is already published: use **Re-run failed jobs** on that run (each
+  attempt uploads its page under its own name, `github-pages-<run id>-<attempt>`, so a re-run does not
+  collide with the first attempt's), or rebuild the page with Actions → **pages** → Run workflow.
 * **Rebuild the downloads page only:** Actions → **pages** → Run workflow on `main`. It reads the public
   manifests and redeploys; no publish, no `gcs-publish` approval, no secrets.
 
