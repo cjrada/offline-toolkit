@@ -1,16 +1,17 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Offline Survival Kit</title><link rel="stylesheet" href="style.css"></head>
-<body><header><h1>Offline Survival Kit</h1><span id="status" class="small"></span></header>
+<body><header><h1>Offline Survival Kit</h1><span id="aiStatus" class="small" role="status">AI: checking…</span></header>
 <p class="disclaimer"><b>Not medical advice</b> - check current guidance (ANZCOR, St John, Red Cross, Healthdirect). In an emergency call <b>000</b>.</p>
 <main>
 <div class="tiles">
- <a class="tile" id="chat"><h2>Chat</h2>General offline AI assistant (llamafile).</a>
+ <a class="tile" href="chat/"><h2>Chat</h2>General offline AI assistant (llamafile).</a>
  <a class="tile" href="docs/"><h2>Ask the Manuals</h2>Answers from the survival PDFs, with page citations.</a>
  <a class="tile" id="lib"><h2>Library</h2>Offline wiki &amp; guides (Kiwix): WikiMed, water, medicine, knots.</a>
  <a class="tile" href="maps/"><h2>Maps</h2>Offline map of all of Australia (OpenStreetMap).</a>
  <a class="tile" href="docs/pdf/"><h2>PDF shelf</h2>Browse the raw manuals.</a>
 </div>
+<p class="warn ai-notice" role="note"><b>AI can make mistakes.</b> Always cross-check answers with the linked sources. Sources can be wrong or out of date too, but they're far more reliable than the AI alone.</p>
 <p class="warn"><b>Safety:</b> AI can be confidently wrong. Never rely on it to identify edible plants or mushrooms, or for medicine doses. Check the cited page or library article, and get professional help (000 in Australia) whenever you can.</p>
 <details id="modelBox"><summary>AI model: <span id="curModel">checking…</span></summary>
 <p class="small" id="modelWhy"></p>
@@ -21,9 +22,21 @@
 <p class="small">Phone access: if the kit was started with LAN mode, open <code>http://&lt;this-laptop-IP&gt;:8000</code> on a phone on the same Wi-Fi/hotspot.</p>
 </main>
 <script>
-const h = location.hostname, p = location.protocol;
-document.getElementById("chat").href = `${p}//${h}:8080/`;
+// Library link on this host (works in LAN mode too) and the AI status. Note: the element is looked up by id;
+// a bare global "status" would be window.status (a legacy string property), not the span.
+const h = location.hostname, p = location.protocol, aiStatus = document.getElementById("aiStatus");
 document.getElementById("lib").href = `${p}//${h}:8081/`;
-fetch(`${p}//${h}:8080/health`).then(r=>r.json()).then(j=>status.textContent="AI: "+(j.status==="ok"?"ready":"loading…")).catch(()=>status.textContent="AI: starting / not running");
+async function checkAI(){
+  let state = "not running";
+  try {
+    const r = await fetch(`${p}//${h}:8080/health`, {cache: "no-store"});
+    const j = await r.json().catch(() => ({}));
+    state = r.ok && j.status === "ok" ? "ready" : "loading…";   // llama.cpp answers 503 while the model loads
+  } catch { state = "starting / not running"; }
+  aiStatus.textContent = "AI: " + state;
+  aiStatus.className = "small ai-" + state.split(/[ /…]/)[0];
+  setTimeout(checkAI, state === "ready" ? 30000 : 3000);
+}
+checkAI();
 </script>
 <script src="models.js"></script></body></html>

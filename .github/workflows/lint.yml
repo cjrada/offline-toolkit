@@ -34,8 +34,12 @@ jobs:
           sh tests/test_pick_model_ps1.sh
       - name: launcher GPU workarounds, CPU fallback and CPU-only toggle (stub llamafile)
         run: sh tests/test_cpu_fallback.sh
-      - name: start.bat static checks (Windows launcher in step with start.sh)
+      - name: start.bat / stop.bat static checks (Windows launcher in step with start.sh)
         run: python3 tests/test_start_bat.py
+      - name: stop.sh stops only this kit (stub servers, PID files, /tmp binary copy)
+        run: sh tests/test_stop.sh
+      - name: kit pages (node, offline) - safe markdown, manuals retrieval and prompt, AI notice, chat page
+        run: node tests/test_kit_js.mjs
       - name: build dependency (libzim, hash-pinned)
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"

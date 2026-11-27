@@ -1,33 +1,12 @@
-// Offline RAG: BM25 keyword retrieval in the browser + local LLM (llamafile, OpenAI-compatible API).
+// Offline RAG: BM25 keyword retrieval in the browser (retrieve.js) + local LLM (llamafile, OpenAI-compatible API).
+// Answers are rendered with md.js: escaped first, then a small markdown subset; [n] links to source n.
+import {createIndex, search, buildMessages} from "./retrieve.js";
+import {renderMarkdown, esc} from "../md.js";
 const LLM = `${location.protocol}//${location.hostname}:8080/v1/chat/completions`;
-const STOP = new Set("a an and are as at be but by can do does for from how i if in into is it its me my of on or our so than that the their then there these this to was we what when where which who why will with you your should would could about".split(" "));
-const tok = s => (s.toLowerCase().match(/[a-z0-9]+/g) || []).filter(w => w.length > 1 && !STOP.has(w)).map(stem);
-function stem(w){ return w.length>4 ? w.replace(/(ing|ed|es|s)$/,"") : w; }
 
-let chunks = [], docs = {}, df = new Map(), avgdl = 0;
-function indexAll(){
-  df = new Map(); let total = 0;
-  for (const c of chunks){ c.tf = new Map(); const ts = tok(c.t); c.len = ts.length; total += ts.length;
-    for (const t of ts) c.tf.set(t,(c.tf.get(t)||0)+1);
-    for (const t of c.tf.keys()) df.set(t,(df.get(t)||0)+1); }
-  avgdl = total / Math.max(1, chunks.length);
-}
-function search(q, k=6){
-  const qt = [...new Set(tok(q))], N = chunks.length, k1 = 1.4, b = 0.75;
-  const scored = [];
-  for (const c of chunks){ let s = 0;
-    for (const t of qt){ const f = c.tf.get(t); if(!f) continue;
-      const n = df.get(t); const idf = Math.log(1 + (N - n + 0.5)/(n + 0.5));
-      s += idf * f*(k1+1)/(f + k1*(1 - b + b*c.len/avgdl)); }
-    if (s>0) scored.push([s*(c.boost||1),c]); }
-  scored.sort((a,b)=>b[0]-a[0]);
-  // max 2 chunks per page to keep sources diverse
-  const out = [], seen = {};
-  for (const [s,c] of scored){ const key=c.f+c.p; if((seen[key]=(seen[key]||0)+1)>2) continue; out.push(c); if(out.length>=k) break; }
-  return out;
-}
+let chunks = [], docs = {}, ix = createIndex([]);
+function indexAll(){ ix = createIndex(chunks); }
 const $ = id => document.getElementById(id);
-const esc = s => s.replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
 function srcLink(c){ return c.blob ? `${c.blob}#page=${c.p}` : c.u ? c.u : `pdf/${encodeURIComponent(c.f)}#page=${c.p}`; }
 const where = c => typeof c.p === 'number' ? `page ${c.p}` : `section "${c.p}"`;
 
@@ -67,23 +46,23 @@ $("add").onchange = async e => {
 // ---- ask ----
 $("f").onsubmit = async e => {
   e.preventDefault(); const q = $("q").value.trim(); if(!q) return;
-  const hits = search(q);
+  const hits = search(ix, q);
   $("srcH").hidden = false;
-  $("sources").innerHTML = hits.map(c => `<li><a href="${srcLink(c)}" target="_blank">${esc(docs[c.f]||c.f)}, ${where(c)}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
+  $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
-  const ctx = hits.map((c,i)=>`[${i+1}] ${docs[c.f]||c.f}, ${where(c)}:\n${c.t}`).join("\n\n");
-  const messages = [
-    {role:"system", content:"You are an offline survival and emergency reference assistant. Answer ONLY using the numbered sources provided. Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly. Be practical and concise. The user is in Australia: where the Australian notes conflict with older US military manuals (for example snake bite: pressure immobilisation bandage, never a constricting band or tourniquet), follow the Australian notes and mention the conflict. Australian emergency number is 000. Never state that a wild plant or mushroom is safe to eat, and never give medication doses that are not in the sources; tell the user to verify with the cited page or a professional."},
-    {role:"user", content:`Sources:\n${ctx}\n\nQuestion: ${q}`}];
+  const messages = buildMessages(q, hits, c => docs[c.f]||c.f, where);
   const out = $("answer"); out.textContent = "Thinking… (first answer on a slow laptop can take a minute)";
   try {
-    const r = await fetch(LLM, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages, stream:true, temperature:0.2, max_tokens:700})});
+    out.classList.add("md");
+    const r = await fetch(LLM, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages, stream:true, temperature:0.1, max_tokens:700})});
+    if (!r.ok) throw new Error(r.status === 503 ? "the model is still loading" : "HTTP " + r.status);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "", txt = "";
     for(;;){ const {done,value} = await rd.read(); if(done) break; buf += dec.decode(value,{stream:true});
       let i; while((i = buf.indexOf("\n")) >= 0){ const line = buf.slice(0,i).trim(); buf = buf.slice(i+1);
         if(!line.startsWith("data:")) continue; const d = line.slice(5).trim(); if(d==="[DONE]") continue;
         try { txt += JSON.parse(d).choices[0].delta.content || ""; } catch {}
-        out.innerHTML = esc(txt).replace(/\[(\d+)\]/g, (m,n)=> hits[n-1] ? `<a href="${srcLink(hits[n-1])}" target="_blank">[${n}]</a>` : m); } }
+        out.innerHTML = renderMarkdown(txt, n => hits[n-1] ? srcLink(hits[n-1]) : null); } }
+    if (!txt) out.textContent = "The AI returned no answer. Try again, or tick \"search only\" and read the sources.";
   } catch(err){ out.textContent = "Could not reach the local AI on port 8080 — is it still starting? (" + err + ")"; }
 };
 await load();

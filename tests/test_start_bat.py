@@ -21,6 +21,8 @@ step with it:
   (GPU_MB > 0) or GPU=vulkan; no-GPU machines keep llamafile. If it exits or hangs, llamafile on the GPU, then the CPU. Both run through tools\\run-ai.bat,
   which logs the exit code. A second start is refused. Vulkan coopmat2 is turned off on Turing
   (GPU_CC 7.5) for llamafile only, unless the user set GGML_VK_DISABLE_COOPMAT2.
+* stop.bat stops only this kit's programs (by .exe path inside the kit folder); "stop.bat all" stops every
+  llamafile / llama-server / kiwix-serve / miniserve, as before.
 """
 import re
 import sys
@@ -175,6 +177,20 @@ check("tools/run-ai.bat exists with CRLF endings", bool(ra) and b"\n" not in ra.
 check("run-ai.bat runs its arguments and logs the exit code",
       b"\r\n%*\r\n" in ra and b"echo [launcher] AI process exit code %errorlevel%" in ra)
 STOP = (BAT.parent / "stop.bat").read_bytes()
-check("stop.bat stops llama-server.exe too", b"taskkill /f /im llama-server.exe" in STOP)
+stop = STOP.decode("ascii")
+check("stop.bat has CRLF line endings", b"\n" not in STOP.replace(b"\r\n", b""))
+default, _, all_mode = stop.partition("\r\n:all\r\n")
+check("stop.bat: 'stop.bat all' branch exists", bool(all_mode) and 'if /i "%~1"=="all" goto all' in default)
+check("stop.bat (default): no stop-by-image-name, which would hit other copies of the same programs",
+      "/im " not in default.lower() and "pkill" not in default)
+check("stop.bat (default): stops only processes whose .exe is inside the kit folder",
+      'set "KIT_DIR=%~dp0"' in default and "$env:KIT_DIR" in default and "ExecutablePath.StartsWith($k" in default
+      and all(e in default for e in ("'llamafile.exe'", "'llama-server.exe'", "'kiwix-serve.exe'", "'miniserve.exe'")))
+check("stop.bat (default): the launcher by its window title; no-PowerShell fallback by the kit's window titles",
+      'taskkill /f /fi "WINDOWTITLE eq Offline Kit - launcher*"' in default
+      and 'taskkill /f /t /fi "WINDOWTITLE eq Offline Kit - *"' in default)
+check("stop.bat all: every engine and server by name, llama-server.exe included",
+      all("taskkill /f /im %s" % e in all_mode for e in ("llamafile.exe", "llama-server.exe", "kiwix-serve.exe", "miniserve.exe")))
+check("already_running points at 'stop.bat all' for an engine that is not the kit's", 'run "stop.bat all"' in text)
 
 sys.exit(1 if fails else 0)

@@ -7,19 +7,42 @@ publishes of different tiers at once could leave it a step behind; the tier file
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --out _site
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --index index.json --out _site   # offline
 
-Writes <out>/index.html and <out>/.nojekyll. The page is plain HTML; the only script is a small inline helper
-for the Support hosting section's copy buttons (the addresses stay selectable text without it). That section
-reads its donation addresses from tools/donate.json and draws their QR codes here, as inline SVG, with the
-stdlib-only encoder below: the deployed page fetches nothing from any other host.
+Writes <out>/index.html, <out>/.nojekyll and <out>/screenshots/*.webp (the "What to expect" gallery, copied from
+site/screenshots/; the site only, never the kit: tools/build_kit.py packs only start/stop scripts, README, LICENSE,
+tools/ and www/). The page is plain HTML; the only script is a small inline helper for the Support hosting
+section's copy buttons (the addresses stay selectable text without it). That section reads its donation
+addresses from tools/donate.json and draws their QR codes here, as inline SVG, with the stdlib-only encoder
+below: the deployed page fetches nothing from any other host. The "AI can make mistakes" notice comes from
+tools/ai-notice.json, the same text the kit's own pages show.
 """
-import argparse, html, json, os, re, sys, time, urllib.error, urllib.request
+import argparse, html, json, os, re, shutil, sys, time, urllib.error, urllib.request
 
 REPO_URL = "https://github.com/cjrada/offline-toolkit"
 TIERS = (("small", "~7 GB"), ("medium", "~41 GB"), ("large", "~173 GB"))
 PUBLIC_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~-]+)*")
 KEY_RE = re.compile(r"(small|medium|large)/[0-9A-Za-z_-][0-9A-Za-z._-]{0,63}/[0-9A-Za-z._-]+")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
-DONATE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "donate.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DONATE_JSON = os.path.join(HERE, "donate.json")
+NOTICE_JSON = os.path.join(HERE, "ai-notice.json")
+SHOTS_DIR = os.path.join(os.path.dirname(HERE), "site", "screenshots")
+# (file, alt text, caption). All are 1440x900 WebP captures of the small kit, unedited.
+SCREENSHOTS = (
+    ("kit-home.webp", "The kit's home page in a browser: tiles for Chat, Ask the Manuals, Library, Maps and PDF shelf, "
+     "a safety note, and the AI model panel showing the 4B model running on the CPU only.",
+     "Home page: chat, manuals, library, maps and the PDF shelf; the model panel shows CPU-only mode."),
+    ("kit-ai-chat.webp", "Offline AI chat answering \"How do I purify water in an emergency?\" with headed sections "
+     "on boiling and chemical treatment.",
+     "AI chat (llamafile's chat page) answering \"How do I purify water in an emergency?\"."),
+    ("kit-library.webp", "The offline library shelf (Kiwix) listing Wikivoyage, Water Treatment, WikiMed, Medical, "
+     "Knots and Outdoors Q&A.",
+     "Offline library (Kiwix): Wikivoyage, water treatment, WikiMed, medicine, knots, Outdoors Q&A."),
+    ("kit-wikivoyage-brisbane.webp", "The Wikivoyage travel guide article for Brisbane, opened offline in the library.",
+     "Wikivoyage's Brisbane article, offline."),
+    ("kit-map-brisbane.webp", "Offline OpenStreetMap map of Brisbane, Moreton Bay and the Gold Coast.",
+     "Offline map of Australia, zoomed to Brisbane, Moreton Bay and the Gold Coast."),
+)
+SHOT_W, SHOT_H = 1440, 900
 DONATE_ID_RE = re.compile(r"[a-z0-9-]{1,16}")
 DONATE_ADDR_RE = re.compile(r"[A-Za-z0-9]{20,100}")
 
@@ -262,6 +285,59 @@ optional, and thank you.</p>
 </section>"""
 
 
+def load_notice(path=NOTICE_JSON):
+    """The kit's "AI can make mistakes" notice (HTML: <b> plus text), shared with www/ pages."""
+    with open(path, encoding="utf-8") as fh:
+        text = json.load(fh)["sources"]
+    if re.search(r"<(?!/?b>)", text):
+        raise SystemExit(f"{path}: the notice may only contain <b> tags")
+    return text
+
+
+def render_expect(notice):
+    """The What to expect section: a screenshot gallery, honest speed and hardware notes, the AI notice."""
+    esc = html.escape
+    figs = "\n".join(
+        f'<figure><a href="screenshots/{f}"><img src="screenshots/{f}" alt="{esc(alt, quote=True)}" '
+        f'width="{SHOT_W}" height="{SHOT_H}" loading="lazy" decoding="async"></a>\n<figcaption>{esc(cap)}</figcaption></figure>'
+        for f, alt, cap in SCREENSHOTS)
+    return f"""<section id="expect">
+<h2>What to expect</h2>
+<p class="warn ai-notice" role="note">{notice}</p>
+<p>Unzip a kit onto a USB drive, run <code>start.bat</code> (Windows) or <code>sh start.sh</code> (Linux) and open
+<code>http://localhost:8000/</code>. Everything below runs from the drive with no internet. These are real, unedited
+screenshots of the small kit (version 20261127) on a Linux laptop, taken before the kit's own chat page and
+this notice were added: the Chat tile now opens a kit page with the notice pinned on screen, and llamafile's
+chat page (shown here) is still one click away.</p>
+<div class="gallery">
+{figs}
+</div>
+<h3>Speed and hardware</h3>
+<ul>
+<li><strong>Measured without a GPU</strong> (8-core CPU, CPU only): the small kit's 4B model (Qwen3-4B-Instruct-2507, Q4_K_M)
+wrote about 7-14 tokens per second. A full chat answer took about 1-2.5 minutes, and an Ask the Manuals answer about a
+minute. With a supported GPU the AI is much faster; the kit uses one automatically.</li>
+<li><strong>Small</strong> (~7 GB, 16 GB drive): Qwen3-4B-Instruct-2507 (2.5 GB) for 8 GB of RAM, and Qwen3-1.7B (1.1 GB) for
+4 GB laptops.</li>
+<li><strong>Medium</strong> (~41 GB, 64 GB drive): adds Qwen3-8B (5.0 GB, noticeably smarter) and a Gemma-3-4B vision model;
+16 GB of RAM recommended.</li>
+<li><strong>Large</strong> (~173 GB, 256 GB drive): adds Qwen3-30B-A3B-Instruct-2507 (18.6 GB); 32 GB of RAM recommended.</li>
+<li>The kit picks the biggest bundled model that fits: model size + about 1 GB of GPU memory, or model size + about
+4 GB of RAM, and you can switch models on the home page. Bigger models answer better but more slowly.</li>
+<li><strong>Library pictures:</strong> the small kit's WikiMed is the "mini" edition (article introductions, text only), so its
+image spaces stay empty; Wikivoyage is the no-pictures edition. The medium kit adds WikiMed and Wikivoyage with images.</li>
+</ul>
+</section>"""
+
+
+def copy_screenshots(out, src=SHOTS_DIR):
+    """Copy the gallery's images next to index.html (self-hosted: the page loads nothing from other hosts)."""
+    dst = os.path.join(out, "screenshots")
+    os.makedirs(dst, exist_ok=True)
+    for f, _, _ in SCREENSHOTS:
+        shutil.copyfile(os.path.join(src, f), os.path.join(dst, f))
+
+
 def public_base(url):
     url = (url or "").strip()
     if url.endswith("/"):
@@ -312,9 +388,10 @@ def gb(n):
     return f"{n / 1e9:,.1f} GB"
 
 
-def render(index, base, built_at=None, donate=None):
+def render(index, base, built_at=None, donate=None, notice=None):
     esc = html.escape
     support = render_support(load_donate() if donate is None else donate)
+    expect = render_expect(load_notice() if notice is None else notice)
     tiers = (index or {}).get("tiers") or {}
     out = []
     for tier, approx in TIERS:
@@ -361,6 +438,12 @@ code.sha {{ word-break: break-all; font-size: .85em; }} .dl {{ font-size: 1.1rem
 svg.qr {{ width: 9rem; height: 9rem; flex: none; border: 1px solid var(--line); }}
 code.wallet {{ word-break: break-all; user-select: all; }}
 button {{ font: inherit; font-size: .85em; margin-left: .4rem; }}
+.warn {{ background: #fff3cd; color: #1b1b1b; padding: .8rem; border-radius: 6px; }}
+@media (prefers-color-scheme: dark) {{ .warn {{ background: #4a3d10; color: #f3ead2; }} }}
+.ai-notice {{ font-size: 1.05rem; }}
+.gallery {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }}
+figure {{ margin: 0; }} figure img {{ display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }}
+figcaption {{ color: var(--muted); font-size: .9rem; margin-top: .3rem; }}
 </style>
 </head>
 <body>
@@ -373,6 +456,7 @@ connection and a download manager that can resume. Format the drive exFAT (FAT32
 (Linux/macOS: <code>shasum -a 256 -c</code>), or on Windows PowerShell compare <code>(Get-FileHash &lt;zip&gt;).Hash</code>
 with the first word of the <code>.sha256</code> file.</p>
 {chr(10).join(out)}
+{expect}
 {support}
 <p class="note">Files are served from Cloudflare R2. Manifests: <a href="{esc(base, quote=True)}/latest.json">latest.json</a> ·
 <a href="{esc(base, quote=True)}/index.json">index.json</a>. Page built {built}.</p>
@@ -400,6 +484,7 @@ def main(argv=None):
     else:
         index = fetch_index(base)
     os.makedirs(a.out, exist_ok=True)
+    copy_screenshots(a.out)
     with open(os.path.join(a.out, "index.html"), "w", encoding="utf-8") as fh:
         fh.write(render(index, base))
     open(os.path.join(a.out, ".nojekyll"), "w").close()

@@ -191,9 +191,12 @@ class Page(unittest.TestCase):
 
     def assert_no_third_party(self, page):
         """Nothing on the page is loaded from another host: no src= at all, no <link>/@import/url(), one inline
-        script with no URLs in it, and every href is the repo, the R2 base, or an in-page anchor."""
-        self.assertNotRegex(page, r"(?i)\ssrc\s*=")
-        self.assertNotRegex(page, r"(?i)<link|@import|url\(|<iframe|<object|<embed|<img")
+        script with no URLs in it, every href is the repo, the R2 base or a gallery image, and the only src= are
+        the gallery's own screenshots/*.webp next to index.html."""
+        srcs = re.findall(r"(?i)\ssrc\s*=\s*\"?([^\"\s>]*)", page)
+        self.assertEqual(sorted(srcs), sorted(f"screenshots/{f}" for f, _, _ in bs.SCREENSHOTS))
+        self.assertEqual(len(re.findall(r"(?i)<img\b", page)), len(bs.SCREENSHOTS))
+        self.assertNotRegex(page, r"(?i)<link|@import|url\(|<iframe|<object|<embed|<source|srcset")
         self.assertNotIn("javascript:", page)
         scripts = re.findall(r"(?is)<script([^>]*)>(.*?)</script>", page)
         self.assertEqual(len(scripts), 1, "only the inline copy helper")
@@ -201,7 +204,8 @@ class Page(unittest.TestCase):
         self.assertNotRegex(scripts[0][1], r"(?i)https?:|//[a-z]|fetch\(|XMLHttpRequest|import\(|\.src\b")
         self.assertIn("navigator.clipboard.writeText", scripts[0][1])
         for href in re.findall(r'href="([^"]*)"', page):
-            self.assertTrue(href.startswith((BASE + "/", "https://github.com/cjrada/offline-toolkit")), href)
+            self.assertTrue(href.startswith((BASE + "/", "https://github.com/cjrada/offline-toolkit"))
+                            or re.fullmatch(r"screenshots/kit-[a-z-]+\.webp", href), href)
         for svg in re.findall(r"(?s)<svg.*?</svg>", page):
             self.assertEqual(re.findall(r"https?://[^\s\"]*", svg), ["http://www.w3.org/2000/svg"])  # xmlns only
 
@@ -222,6 +226,51 @@ class Page(unittest.TestCase):
         svgs = re.findall(r"(?s)<svg class=\"qr\".*?</svg>", page)
         self.assertEqual([qr_read(svg_grid(x)) for x in svgs], [BTC, ETH])
         self.assert_no_third_party(page)
+
+    def test_expect_section(self):
+        """What to expect: below the downloads and above Support hosting, the shared AI notice, the five
+        screenshots (lazy, sized, described), honest speed notes and the hardware figures from the README."""
+        idx = {"tiers": {"small": [entry("small", "v3")]}}
+        page = bs.render(idx, BASE, built_at="x")
+        self.assertEqual(page.count('<section id="expect">'), 1)
+        self.assertIn("<h2>What to expect</h2>", page)
+        self.assertLess(page.index('id="large"'), page.index('id="expect"'))   # downloads stay first
+        self.assertLess(page.index('id="expect"'), page.index('id="support"'))
+        self.assertLess(page.index(f'href="{BASE}/small/v3/offline-toolkit-small-v3.zip"'), page.index('id="expect"'))
+        sec = page.split('<section id="expect">')[1].split("</section>")[0]
+        # the notice: the same text as the kit pages (tools/ai-notice.json), always visible (not in <details>)
+        with open(bs.NOTICE_JSON, encoding="utf-8") as fh:
+            notice = json.load(fh)["sources"]
+        self.assertIn(f'<p class="warn ai-notice" role="note">{notice}</p>', sec)
+        for s in ("AI can make mistakes.", "Always cross-check answers with the linked sources.",
+                  "Sources can be wrong or out of date too, but they're far more reliable than the AI alone."):
+            self.assertIn(s, notice)
+        self.assertNotIn("<details", sec)
+        imgs = re.findall(r"<img [^>]*>", sec)
+        self.assertEqual(len(imgs), 5)
+        for (f, alt, cap), img in zip(bs.SCREENSHOTS, imgs):
+            self.assertIn(f'src="screenshots/{f}"', img)
+            self.assertIn('width="1440" height="900"', img)
+            self.assertIn('loading="lazy"', img)
+            m = re.search(r'alt="([^"]+)"', img)
+            self.assertTrue(m and len(m.group(1)) > 30, img)
+            self.assertIn(f"<figcaption>{bs.html.escape(cap)}</figcaption>", sec)
+            self.assertTrue(os.path.exists(os.path.join(bs.SHOTS_DIR, f)), f)
+        for f in ("kit-home", "kit-ai-chat", "kit-library", "kit-wikivoyage-brisbane", "kit-map-brisbane"):
+            self.assertIn(f"screenshots/{f}.webp", sec)
+        for s in ("7-14 tokens per second", "1-2.5 minutes", "Ask the Manuals answer about a\nminute", "8-core CPU",
+                  "much faster", "Qwen3-4B-Instruct-2507", "Qwen3-8B (5.0 GB", "Qwen3-30B-A3B-Instruct-2507 (18.6 GB)",
+                  "8 GB of RAM", "16 GB of RAM", "32 GB of RAM", '"mini" edition'):
+            self.assertIn(s, sec)
+        self.assert_no_third_party(page)
+
+    def test_screenshots_stay_out_of_the_kit(self):
+        """site/ is for the website only: build_kit.py packs only KIT_CODE, which does not include it."""
+        sys.path.insert(0, os.path.dirname(bs.__file__))
+        src = open(os.path.join(os.path.dirname(bs.__file__), "build_kit.py"), encoding="utf-8").read()
+        kit_code = re.search(r"^KIT_CODE = (\[.*\])$", src, re.M).group(1)
+        self.assertNotIn("site", kit_code)
+        self.assertTrue(bs.SHOTS_DIR.endswith(os.path.join("site", "screenshots")))
 
     def test_donate_config(self):
         """tools/donate.json is the one place the addresses live, and both checksums are valid."""
@@ -277,7 +326,7 @@ class Page(unittest.TestCase):
         evil["version"] = "<b>"
         page = bs.render({"tiers": {"small": [bad, evil, entry("medium", "v3")]}}, BASE)
         self.assertNotIn("javascript:", page)
-        self.assertNotIn("<b>", page)
+        self.assertNotIn("<b>", page.replace(bs.load_notice(), ""))  # the notice's own <b> aside
         self.assertEqual(page.count("Not published yet."), 3)  # a medium entry under small is ignored too
 
     def test_fetch_reads_the_tier_indexes(self):
@@ -298,7 +347,16 @@ class Page(unittest.TestCase):
         self.assertEqual(bs.main(["--public-url", BASE + "/", "--index", idx, "--out", os.path.join(d, "site")]), 0)
         self.assertTrue(os.path.exists(os.path.join(d, "site", "index.html")))
         self.assertTrue(os.path.exists(os.path.join(d, "site", ".nojekyll")))
-        self.assertEqual(sorted(os.listdir(os.path.join(d, "site"))), [".nojekyll", "index.html"])  # QRs are inline
+        self.assertEqual(sorted(os.listdir(os.path.join(d, "site"))), [".nojekyll", "index.html", "screenshots"])  # QRs are inline
+        # the gallery's images are copied next to index.html, byte for byte, and every <img> points at one
+        shots = sorted(os.listdir(os.path.join(d, "site", "screenshots")))
+        self.assertEqual(shots, sorted(f for f, _, _ in bs.SCREENSHOTS))
+        for f in shots:
+            with open(os.path.join(d, "site", "screenshots", f), "rb") as a, open(os.path.join(bs.SHOTS_DIR, f), "rb") as b:
+                data = a.read()
+                self.assertEqual(data, b.read())
+            self.assertEqual(data[:4] + data[8:12], b"RIFFWEBP", f)
+            self.assertLess(len(data), 200_000, f)
         with open(os.path.join(d, "site", "index.html"), encoding="utf-8") as fh:
             page = fh.read()
         self.assertIn(BTC, page)

@@ -7,8 +7,13 @@ import json, os, re, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PDF_DIR = os.path.join(ROOT, "www", "docs", "pdf")
 OUT = os.path.join(ROOT, "www", "docs", "index.js")
-TITLES_FILE = os.path.join(PDF_DIR, "titles.json")
-titles = json.load(open(TITLES_FILE)) if os.path.exists(TITLES_FILE) else {}
+# Display titles of the PDFs. Kept in tools/, not next to the PDFs, so the PDF shelf (a directory listing of
+# www/docs/pdf/) shows only PDFs. An old www/docs/pdf/titles.json is still read, and wins, if present.
+titles = {}
+for TITLES_FILE in (os.path.join(ROOT, "tools", "pdf-titles.json"), os.path.join(PDF_DIR, "titles.json")):
+    if os.path.exists(TITLES_FILE):
+        with open(TITLES_FILE, encoding="utf-8") as fh:
+            titles.update(json.load(fh))
 CHUNK, OVERLAP = 900, 150
 
 def pages(path):
@@ -43,7 +48,7 @@ if os.path.isdir(NOTES_DIR):
             for c in chunks(sec):
                 out.append({"f": fn, "p": head, "t": c, "u": "notes/" + fn, "boost": 1.6})
         print(f"{fn}: {sum(1 for o in out if o['f']==fn)} chunks", file=sys.stderr)
-for fn in sorted(os.listdir(PDF_DIR)):
+for fn in sorted(os.listdir(PDF_DIR)) if os.path.isdir(PDF_DIR) else []:
     if not fn.lower().endswith(".pdf"): continue
     title = titles.get(fn, fn[:-4])
     docs.append({"file": fn, "title": title})
