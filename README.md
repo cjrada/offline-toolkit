@@ -278,7 +278,8 @@ All checks are plain rules, not another AI grading the answer, so a score means 
   000) and forbidden advice (a tourniquet, vinegar on a bluebottle, a pressure bandage on a redback bite).
   A forbidden phrase does not count only when a negator governs it: within the 4 words just before it, in the
   same clause ("do **not** use a tourniquet", "NOT a tourniquet or a constricting band"). A comma, colon or
-  "if / unless / when / but" ends that window, so "If you can't reach a plumber, tape the pipe joint" fails.
+  "if / unless / when / but / and / so" ends that window, so "If you can't reach a plumber, tape the pipe
+  joint" and "Don't panic and apply a tourniquet" fail. Curly apostrophes (Don’t) count as straight ones.
 * `abstain`: says the sources or manuals do not cover it, or declines ("I can't give doses"). A bare "no" or
   "don't" is not enough.
 * Ask the Manuals: every answer cites at least one `[n]`, and only sources that were really sent.
@@ -290,13 +291,13 @@ All checks are plain rules, not another AI grading the answer, so a score means 
   per quart)" fails against the WA DoH table: 10 drops is its figure for 1/2 gallon. "5 drops of iodine"
   fails against a bleach table. Other quantities (minutes, %, litres) need the same number and unit in a source.
 * Retrieval is scored on its own, so a failure shows whether the search or the model was at fault.
+* Every answer: not empty, not cut off at the token limit, no leaked `<think>` reasoning.
 
 Retrieval on a real index (27 Nov 2026): `node tools/llm_eval.mjs --retrieval-only --ctx 8192 --index <kit>/www/docs/index.js`
 on the published small kit's index (build 20261127-b6f1c1bc, 6 documents, 2,198 passages) found the required
 sources for **37/37** manuals cases with a `retrieve` pattern, with no misses. That includes shelter, navigation,
 signals, bleeding, hypothermia and fractures (FM 21-76, FM 4-25.11, USMC, Ready.gov pages). `rag-burn` got its
 `retrieve` pattern after that run, from the manuals the run found for it.
-* Every answer: not empty, not cut off at the token limit, no leaked `<think>` reasoning.
 
 The report shows the pass rate and, per case, *reliable* (every run passed), *flaky* or *failing*, with the
 first failed check and the failing answer. It exits 1 if the pass rate is below `--min-pass` (default 1.0).
