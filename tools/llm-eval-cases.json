@@ -126,6 +126,7 @@
 
   {"id": "rag-burn", "mode": "rag", "topic": "first-aid",
    "question": "How should I treat a burn?",
+   "retrieve": ["US-Army|USMC|FM21-76"],
    "require": [["cool", "water"]],
    "forbid": ["\\b(butter|toothpaste|oil|grease)\\b", "\\bice\\b"]},
 

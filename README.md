@@ -290,6 +290,12 @@ All checks are plain rules, not another AI grading the answer, so a score means 
   per quart)" fails against the WA DoH table: 10 drops is its figure for 1/2 gallon. "5 drops of iodine"
   fails against a bleach table. Other quantities (minutes, %, litres) need the same number and unit in a source.
 * Retrieval is scored on its own, so a failure shows whether the search or the model was at fault.
+
+Retrieval on a real index (27 Nov 2026): `node tools/llm_eval.mjs --retrieval-only --ctx 8192 --index <kit>/www/docs/index.js`
+on the published small kit's index (build 20261127-b6f1c1bc, 6 documents, 2,198 passages) found the required
+sources for **37/37** manuals cases with a `retrieve` pattern, with no misses. That includes shelter, navigation,
+signals, bleeding, hypothermia and fractures (FM 21-76, FM 4-25.11, USMC, Ready.gov pages). `rag-burn` got its
+`retrieve` pattern after that run, from the manuals the run found for it.
 * Every answer: not empty, not cut off at the token limit, no leaked `<think>` reasoning.
 
 The report shows the pass rate and, per case, *reliable* (every run passed), *flaky* or *failing*, with the
@@ -359,8 +365,9 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   `start.bat` statically. The home-page toggle was checked in headless Chromium (state shown, correct request
   sent, disabled when opened from another host). `start.bat` itself was not run.
 * LLM reliability eval (`tests/test_llm_eval.mjs`, offline, in CI): the cases file, every check on good and
-  bad answers, dose grounding on the verbatim WA DoH and USMC bleach tables (the invented "10 drops per gallon" fails), requests identical to the pages', and a full run against a stub AI server. The harness has
-  not yet been run against a real model.
+  bad answers, dose grounding on the verbatim WA DoH and USMC bleach tables (the invented "10 drops per gallon" fails), requests identical to the pages', and a full run against a stub AI server. `--retrieval-only` on the
+  published small kit's index (27 Nov 2026, ctx 8192): 37/37 manuals cases found their sources. A full answer
+  run against a real model is not recorded here yet.
 * Windows: binaries verified as PE x86-64 (`llamafile.exe` is an APE polyglot with a valid PE header); not executed.
 
 ## Licences
