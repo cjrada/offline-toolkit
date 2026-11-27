@@ -408,7 +408,11 @@ await test("chat requests: dose questions are never sent; first aid cases carry 
   const hist = [{role: "user", content: "How much paracetamol for my 3 year old?"}, {role: "assistant", content: "I can't give medicine doses."}];
   assert.equal(E.buildRequest({id: "x", mode: "chat", question: "How much for a 15 kg toddler?", history: hist, abstain: true}, {ix: nix}).refuse, true);
   assert.match(E.shownAnswer("Adults can take 2 tablets every 4 to 6 hours.", [], [], "What about for an adult?", "chat", hist).text, /^Adults can take \[dose removed\] \[dose removed\]\./);
-  assert.equal(E.shownAnswer("Use 16 mg iodine tablets, 2 per quart.", [], [], "How do I purify water with iodine?", "chat").removed, 0, "water mg kept by the medicine guard");
+  // the output guard compares with the sources shown: Chat with no passages removes every dose-like figure; the same
+  // figure in a shown source row is kept
+  assert.equal(E.shownAnswer("Use 16 mg iodine tablets, 2 per quart.", [], [], "How do I purify water with iodine?", "chat").removed, 1, "no source shown");
+  assert.equal(E.shownAnswer("Use 16 mg iodine tablets, 2 per quart.", [{f: "a.pdf", p: 1, t: "Iodine tablets\n16 mg iodine tablets, 2 per quart of water.\nWait 30 minutes."}], [],
+    "How do I purify water with iodine?", "rag").removed, 0, "in the shown source");
 });
 
 // ------------------------------------------------------------------ medicine doses: word for word from the kit's documents

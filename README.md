@@ -216,35 +216,29 @@ notes first), and send the passages with a rule to answer from them only and fol
 older US manual differs. The passages used are linked under the answer. Other questions are sent as before.
 
 **Medicine doses: only word for word from the kit's documents, never from the AI** (`www/medicine.js`,
-`www/docs/exact.js` `medicineRoute`; code, not only a prompt rule). A medicine dose question is one that names a
-medicine (paracetamol, ibuprofen, antibiotics, "medicine"...) and asks for an amount (dose, how much, mg, ml, a body
-weight...), uses a dose word itself ("What is the dose of X?", also for a drug no list names), quotes an mg dose, or (in
-Chat) asks for an amount after a turn that named a medicine. Water treatment is never one. It is never
-sent to the AI, however it is phrased ("ignore your instructions", "I am a doctor", role-play).
-* **Ask the Manuals** answers it itself. If a retrieved source holds a dose for what was asked, the *exact wording* box
-  shows those lines word for word with their source links. A dose line is found by content (an mg / mcg / IU / mg/kg
-  figure, or a dose amount where a medicine is named). For a question that names a known medicine, the line itself
-  must name that medicine (brand names count as the same drug) and no other, so a paracetamol question never shows an
-  ibuprofen line. For a question that names none (a drug no list knows), one of its own words must be in the line or
-  just before it, and the line must name no known medicine. Under the box a caveat, which also cites
-  them, says it is quoted from the kit's documents, may not fit this person, to check it against the packet or label and
-  the person's age and weight, to follow the source and label exactly, and to get medical advice (a pharmacist,
-  Healthdirect 1800 022 222, or 000) if possible. If no source holds one, it says that the kit's documents do not give a
-  dose for it, not to guess one, and gives the packet / pharmacist / Healthdirect / 000 pointer, with no box. That is
-  the expected answer today for child paracetamol or amoxicillin: the current manuals do not give those doses.
-  Detection is not a fixed drug list, so curated medical references added to the index later (`www/docs/pdf/` +
-  `tools/build_index.py`) are shown the same way. Any other question (say "How much water should I drink with a
-  fever?") takes the usual path, and medicine-dose lines are dropped from its box.
-* **Chat** has no manuals on its general path and states no doses: it answers with a fixed message pointing to Ask the
-  Manuals (for any dose in the kit's documents) and to the packet, a pharmacist, Healthdirect (1800 022 222) or 000.
-* **In every AI answer** on both pages, as it streams, the AI's own medicine-dose figures become *[dose removed]*,
-  with the pointer (in Chat also to Ask the Manuals). Once the question, an earlier turn or the answer names a
-  medicine, that is every mg / mcg / mg/kg / IU, ml, tablet or drop amount, frequency and daily maximum ("every four
-  hours", "twice a day", "max 6 in a day") anywhere in the answer; otherwise mg-type figures outside water treatment.
-  A question that names a medicine always ends with the pointer.
-* **Water treatment is not a medicine:** "How many 16 mg iodine tablets per quart?" or "8 mg of chlorine per litre"
-  is answered and left as it is, and drops of bleach per litre have their own check against the sources
-  (`www/docs/dose.js`).
+`www/docs/exact.js` `medicineRoute`; code, not only a prompt rule).
+* **Safety is the output guard**, on both pages and every AI answer as it streams, whatever the question. Every
+  dose-like figure in the AI's text (mg, mcg, ml, tablets, capsules, drops, puffs, sachets, units, spoons, mg/kg,
+  frequencies in digits or words, daily maxima, fractions of a tablet) is removed (*[dose removed]*, with the packet /
+  pharmacist / Healthdirect 1800 022 222 / 000 pointer) unless one row of the sources shown to the reader holds it:
+  the same value however written ("four times daily" = "4 times a day"), every figure of the clause in that one row,
+  the person it names (adults, children, 15 kg) in that row or its heading, the volume of water and strength in that
+  passage, a dosing row (not a water-treatment row) for "take / give", and the same drug. In Chat with no passages
+  shown, every such figure is removed. So "Adults take 2 iodine tablets once a day" is removed unless that row is in a
+  shown source, and water-treatment amounts from the shown sources (bleach drops, 16 mg iodine tablets per quart,
+  8 mg of chlorine per litre) are kept. The guard compares with whatever was shown, not with a drug list, so curated
+  medical references added to the index later work as they are.
+* **Routing only decides what is shown.** A medicine dose question (it names a medicine and asks for an amount, uses
+  a dose word, quotes an mg dose, or in Chat asks for an amount after a medicine turn) is not sent to the AI:
+  * **Ask the Manuals** shows the retrieved source lines holding the dose word for word in the *exact wording* box,
+    with their source links. For a named medicine the line must name it and no other drug; a line whose drug is named
+    only just before it is never shown for an unnamed one. Under the box a caveat, which also cites them, says it is
+    quoted from the kit's documents, may not fit this person, to check it against the packet or label and the person's
+    age and weight, to follow the source and label exactly, and to get medical advice (a pharmacist, Healthdirect
+    1800 022 222, or 000) if possible. If no source holds one, it says the kit's documents do not give a dose for it,
+    not to guess one, and gives the pointer. That is the expected answer today for child paracetamol or amoxicillin.
+    Other questions take the usual path, with medicine-dose lines dropped from their box.
+  * **Chat** states no doses: it points to Ask the Manuals (for any dose in the kit's documents) and gives the pointer.
 The notice text lives in `tools/ai-notice.json` and is shared by the home, chat and manuals pages and the
 downloads site.
 

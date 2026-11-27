@@ -5,7 +5,8 @@
 // Medicine doses only word for word from the kit's documents (exact.js medicineRoute, ../medicine.js): a medicine dose
 // question is never sent to the AI. The page shows the source passages that hold the dose, with their links and a
 // caveat, or says the kit's documents do not give it (with the packet / pharmacist / Healthdirect / 000 pointer).
-// In every AI answer the AI's own medicine-dose figures are removed.
+// Safety rests on the output guard, not on the question: in every AI answer any dose-like figure that is not in the
+// sources shown (same value, same row, same conditions) is removed. Question routing only decides what is shown.
 import {createIndex, search, buildMessages, sourceBudget, ANSWER_TOKENS, tidyAnswer} from "./retrieve.js";
 import {extractExact, renderExact, renderAnswer, allowedText, medicineRoute, withoutMedicineDoses} from "./exact.js";
 import {esc, renderMarkdown} from "../md.js";
@@ -70,6 +71,9 @@ $("f").onsubmit = async e => {
   $("exact").innerHTML = renderExact(exact, title, where, srcLink); $("exact").hidden = !exact.length;
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
   const messages = buildMessages(q, hits, title, where, exact), allowed = allowedText(exact, hits);
+  // what the reader is shown: the sources (linked under Sources) and the exact box. Any dose-like figure the AI writes
+  // that is not in one row of these, with the conditions it gives it, is removed (../medicine.js guardMedicine).
+  const shown = [...hits.map(h => h.t), ...exact.flatMap(b => b.excerpts)];
   const out = $("answer"); out.textContent = "Thinking… (first answer on a slow laptop can take a minute)";
   try {
     out.classList.add("md");
@@ -80,7 +84,7 @@ $("f").onsubmit = async e => {
       let i; while((i = buf.indexOf("\n")) >= 0){ const line = buf.slice(0,i).trim(); buf = buf.slice(i+1);
         if(!line.startsWith("data:")) continue; const d = line.slice(5).trim(); if(d==="[DONE]") continue;
         try { txt += JSON.parse(d).choices[0].delta.content || ""; } catch {}
-        out.innerHTML = renderAnswer(guardMedicine(q, tidyAnswer(txt)).text, allowed, n => hits[n-1] ? srcLink(hits[n-1]) : null, exact.length > 0).html; } }
+        out.innerHTML = renderAnswer(guardMedicine(q, tidyAnswer(txt), [], {sources: shown}).text, allowed, n => hits[n-1] ? srcLink(hits[n-1]) : null, exact.length > 0).html; } }
     if (!txt) out.textContent = "The AI returned no answer. Try again, or tick \"search only\" and read the sources.";
   } catch(err){ out.textContent = "Could not reach the local AI on port 8080 — is it still starting? (" + err + ")"; }
 };

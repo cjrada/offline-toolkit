@@ -375,7 +375,10 @@ export function buildRequest(c, {ix, docs = {}, ctx = DEFAULT_CTX, temperature, 
 // renderAnswer: doses without the source's conditions and figures not in the sources become "[amount removed]").
 export const REMOVED = "[amount removed]";
 export function shownAnswer(answer, hits, exact = [], question = "", mode = "rag", history = []){
-  const m = M.guardMedicine(question, answer, history, {chat: mode === "chat"});
+  // the output guard, with the sources the reader is shown (Ask the Manuals: the sources and the exact box; Chat: the
+  // first aid passages, or none)
+  const shownSources = mode === "rag" ? [...hits.map(h => h.t), ...exact.flatMap(b => b.excerpts)] : hits.map(h => h.t);
+  const m = M.guardMedicine(question, answer, history, {chat: mode === "chat", sources: shownSources});
   if (mode !== "rag") return {text: m.text, removed: m.removed, doses: []};
   const g = X.guardAnswer(m.text, X.allowedText(exact, hits));
   return {text: g.text.replace(/\u0001/g, REMOVED), removed: m.removed + g.removed, doses: g.doses};
