@@ -220,6 +220,15 @@ passages), sends the top 6 sources to the local model, each with the next passag
 split across two passages; all sources together are sized to the context the AI runs with (llama.cpp `/props`, else `models.json`): ~4,750
 characters at 4096, 9,000 at 8192 and up), and tells it to answer only the question asked, only from these sources, citing
 [n], and to quote any dose or quantity exactly as the source states it (or say that no source gives one).
+**Amounts are shown word for word, not by the AI** (`www/docs/exact.js`): when a question asks about an amount
+(how much / how many / how long, dose, ratio, drops, teaspoons, ml, litres, tablets, ppm, percent, minutes,
+temperature) or is a "make water safe to drink" question, the page shows a *From the sources (exact wording)*
+box above the answer: the lines of each retrieved source that hold figures (number + unit), with their table
+heading and conditions (e.g. "All figures are based on one quart of water", "household bleach containing
+5.25-8.25 percent chlorine", "let stand for at least 60 minutes"), copied from the index unchanged and escaped,
+one block per source with its [n] link. The model is then told not to write any figure itself, only a short
+framing, and any figure in its answer that is not word for word in those blocks is replaced by *[amount removed]*
+with a caution (a small model paraphrasing a dosing table mixes rows, converts units and invents amounts).
 Answers render a small, safe markdown subset (`www/md.js`: bold, italics, lists, headings, code; model output
 is escaped first, and the only links are the [n] citations, each opening the exact PDF page). A notice next to
 the answer says the AI can make mistakes and to cross-check the linked sources.

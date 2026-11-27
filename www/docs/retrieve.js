@@ -35,10 +35,12 @@ export function queryTerms(q){
   const base = [...new Set(tok(q))], w = new Map(base.map(t => [t, 1]));
   const add = t => { t = stem(t); if (!w.has(t)) w.set(t, EXPAND_WEIGHT); };
   for (const t of base) for (const x of EXPAND[t] || []) add(x);
-  const wantsSafeWater = w.has("water") && base.some(t => ["safe", "drink", "clean", "purif", "treat", "disinfect", "potable", "contamin", "steril"].some(p => t.startsWith(p)));
-  if (wantsSafeWater) WATER_SAFETY.forEach(add);
+  if (safeWaterTerms(base)) WATER_SAFETY.forEach(add);
   return w;
 }
+const safeWaterTerms = base => base.includes("water") && base.some(t => ["safe", "drink", "clean", "purif", "treat", "disinfect", "potable", "contamin", "steril"].some(p => t.startsWith(p)));
+// "Make water safe / drinkable / clean" and the like: a question whose answer is a dose (exact.js shows it verbatim).
+export const wantsSafeWater = q => safeWaterTerms([...new Set(tok(q))]);
 
 export function createIndex(chunks){
   const df = new Map(); let total = 0;
@@ -112,23 +114,36 @@ export function search(ix, q, {k = 6, maxPerPage = 2, maxChars = 9000} = {}){
   return picked;
 }
 
-export const SYSTEM_PROMPT = [
-  "You are an offline survival and emergency reference assistant.",
-  "Answer ONLY the question asked, using ONLY the numbered sources provided. Do not add facts, tips, warnings or topics that the question did not ask about, even if a source mentions them.",
-  "Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly instead of answering from memory.",
-  "Numbers: give every dose, amount or time exactly as its source states it, together with the conditions the source attaches to it (product strength or percentage, amount of water, clear, cloudy or cold water, waiting time, and purpose such as treatment or storage), with its citation.",
-  "Never combine, average or convert figures from different sources, tables or table rows. If sources give different figures, list each one separately with its own citation. If you are not sure which row of a table applies, quote the rows as written.",
-  "After any dose or amount, add a short caution to check it against the cited page. If no source states an amount, say that the sources give no amount; do not guess one.",
-  "Be practical and concise. Put citations inside sentences; do not end with a line of citations only.",
-  "The user is in Australia. If an Australian note and an older US manual disagree on the question asked, follow the Australian note and mention the difference. The Australian emergency number is 000.",
-  "Never state that a wild plant or mushroom is safe to eat.",
-].join(" ");
+const RULES = {
+  role: "You are an offline survival and emergency reference assistant.",
+  only: "Answer ONLY the question asked, using ONLY the numbered sources provided. Do not add facts, tips, warnings or topics that the question did not ask about, even if a source mentions them.",
+  cite: "Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly instead of answering from memory.",
+  numbers: "Numbers: give every dose, amount or time exactly as its source states it, together with the conditions the source attaches to it (product strength or percentage, amount of water, clear, cloudy or cold water, waiting time, and purpose such as treatment or storage), with its citation.",
+  noMix: "Never combine, average or convert figures from different sources, tables or table rows. If sources give different figures, list each one separately with its own citation. If you are not sure which row of a table applies, quote the rows as written.",
+  check: "After any dose or amount, add a short caution to check it against the cited page. If no source states an amount, say that the sources give no amount; do not guess one.",
+  style: "Be practical and concise. Put citations inside sentences; do not end with a line of citations only.",
+  au: "The user is in Australia. If an Australian note and an older US manual disagree on the question asked, follow the Australian note and mention the difference. The Australian emergency number is 000.",
+  food: "Never state that a wild plant or mushroom is safe to eat.",
+};
+export const SYSTEM_PROMPT = Object.values(RULES).join(" ");
+// When exact.js shows the source amounts word for word, the model must not write figures at all: a 4B model
+// paraphrasing a dosing table gets them wrong. It frames the answer and points to the sources instead.
+export const exactRule = ns => `Exact amounts: the reader is shown the passages of source${ns.length > 1 ? "s" : ""} ${ns.map(n => `[${n}]`).join(" ")} ` +
+  "that hold the amounts, word for word, next to your answer. So do NOT write any figure yourself: no numbers, doses, amounts, " +
+  "ratios, percentages, temperatures or times, in digits or in words, and never convert or combine them. Instead, in a few short " +
+  "sentences, say which method each source describes, which source [n] gives its amounts, and in words what the amounts depend on " +
+  "(product strength, amount of water, clear, cloudy or cold water, waiting time, treatment or storage). Then tell the reader to " +
+  "use the exact wording shown. If the sources do not answer the question, say so.";
+export const exactPrompt = ns => [RULES.role, RULES.only, RULES.cite, exactRule(ns), RULES.style, RULES.au, RULES.food].join(" ");
 
 // A final line or paragraph made only of citations ("[2]", "[1][2]") adds nothing: drop it.
 export const tidyAnswer = txt => txt.replace(/\s*\n[ \t]*(\[\d{1,3}\][ \t,]*)+\s*$/, "\n");
 
-export function buildMessages(q, hits, title, where){
+// exact: the excerpts exact.js shows word for word ([{n, ...}]); with any, the model is told not to write figures.
+export function buildMessages(q, hits, title, where, exact = []){
   const ctx = hits.map((c, i) => `[${i + 1}] ${title(c)}, ${where(c)}:\n${c.t}`).join("\n\n");
-  return [{role: "system", content: SYSTEM_PROMPT},
-          {role: "user", content: `Sources:\n${ctx}\n\nQuestion: ${q}\n\nAnswer only this question, from these sources, with citations.`}];
+  const ns = exact.map(b => b.n);
+  return [{role: "system", content: ns.length ? exactPrompt(ns) : SYSTEM_PROMPT},
+          {role: "user", content: `Sources:\n${ctx}\n\nQuestion: ${q}\n\nAnswer only this question, from these sources, with citations.` +
+            (ns.length ? " Do not write any amounts or times: they are shown to the reader word for word." : "")}];
 }
