@@ -230,8 +230,9 @@ one block per source with its [n] link. The model is then told not to write any 
 framing, and any figure in its answer that is not in the sources is replaced by *[amount removed]* with a caution
 (a small model paraphrasing a dosing table mixes rows, converts units and invents amounts). The check compares
 numbers and units, not spelling ("one full minute" = "1 minute", "5.25% to 8.25%" = "5.25-8.25 percent", gtts =
-drops), never converts units, and accepts a "per" figure only if the source states it or has both parts in one
-table row. For amount questions, retrieval also ranks passages holding dose figures higher, so a table outranks
+drops, "1 1/2" = "1½"), never converts units, and accepts a "per" figure only if the source states it or has it
+as a table row (the amount right after its volume, "1 quart/1 liter 5 drops", also on one-line text from PDFs
+added in the browser). For amount questions, retrieval also ranks passages holding dose figures higher, so a table outranks
 the prose around it.
 Answers render a small, safe markdown subset (`www/md.js`: bold, italics, lists, headings, code; model output
 is escaped first, and the only links are the [n] citations, each opening the exact PDF page). A notice next to

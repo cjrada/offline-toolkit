@@ -88,31 +88,43 @@ export function parseFigure(g){
 }
 const atom = (n, u) => `${k(n)} ${u}`;
 function figuresIn(text){
-  const atoms = new Set(), ranges = new Set(), compounds = new Set(), rows = [];
+  const atoms = new Set(), ranges = new Set(), compounds = new Set(), rows = [], adjacent = new Set();
   for (const line of String(text).split("\n")){
     const byUnit = new Map(), add = (n, u) => { const a = atom(n, u); atoms.add(a); (byUnit.get(u) || byUnit.set(u, new Set()).get(u)).add(a); };
-    for (const m of line.matchAll(new RegExp(FIGURE_SRC, "gi"))){
-      const f = parseFigure(m.groups), head = f.nums.map(n => atom(n, f.u));
+    const ms = [...line.matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => {
+      const f = parseFigure(m.groups), head = f.nums.map(n => atom(n, f.u)), key = head.join("-");
       f.nums.forEach(n => add(n, f.u));
-      if (f.nums.length === 2) ranges.add(head.join("-"));
-      if (f.tail){ add(...f.tail); compounds.add(head.join("-") + " / " + atom(...f.tail)); }
-    }
+      if (f.nums.length === 2) ranges.add(key);
+      const parts = [...head];
+      if (f.tail){ const t = atom(...f.tail); add(...f.tail); compounds.add(key + " / " + t); parts.push(t); }
+      return {key, parts, u: f.u, start: m.index, end: m.index + m[0].length};
+    });
+    // A table row, also when the table is flattened to one line: the amount right after its volume, nothing but spaces
+    // or "/" between ("1 quart/1 liter 5 drops", "1 gallon 1/4 teaspoon"). Only the figure just before the amount counts,
+    // with the figures joined to it by "/" ("1/2 gallon/2 quarts/2 liters 10 drops"), never one in the amount's own unit.
+    ms.forEach((m, j) => {
+      for (let i = j - 1, end = m.start; i >= 0 && ms[i].u !== m.u &&
+           (i === j - 1 ? /^[\s\/]{0,3}$/ : /^\s?\/\s?$/).test(line.slice(ms[i].end, end)); end = ms[i].start, i--)
+        for (const p of ms[i].parts) adjacent.add(m.key + " | " + p);
+    });
     if (byUnit.size) rows.push(byUnit);
   }
-  return {atoms, ranges, compounds, rows};
+  return {atoms, ranges, compounds, rows, adjacent};
 }
 let memo = ["", null];
 // Is this figure (a regexp match's groups) in the text, as the same number(s) and unit, however written? A "per" figure
-// ("5 drops per quart") also counts as a table row: a line of the text (a real line break, not a sentence) whose only
-// figure in each of the two units is that one ("1 quart/1 liter 5 drops"). A table flattened to one line (a PDF added
-// in the browser) has many drops figures on its line, so it never pairs figures from different rows.
+// ("5 drops per quart") counts if the source states it, or as a table row:
+//  * a line of the text (a real line break, not a sentence) whose only figure in each of the two units is that one; or
+//  * the amount directly after the volume figure(s), with only spaces or "/" between ("1 quart/1 liter 5 drops"). This
+//    also works on a table flattened to one line (PDFs added in the browser) without pairing figures from other rows.
 export function figureInText(g, text){
   if (memo[0] !== text) memo = [text, figuresIn(text)];
   const F = memo[1], f = parseFigure(g), head = f.nums.map(n => atom(n, f.u));
   const headOk = head.every(a => F.atoms.has(a)) || (head.length === 2 && F.ranges.has(head.join("-")));
   if (!f.tail) return headOk;
-  const t = atom(...f.tail), only = (row, u, want) => { const got = row.get(u); return !!got && got.size === want.length && want.every(a => got.has(a)); };
-  return F.compounds.has(head.join("-") + " / " + t) || (f.u !== f.tail[1] && F.rows.some(r => only(r, f.u, head) && only(r, f.tail[1], [t])));
+  const t = atom(...f.tail), key = head.join("-"), only = (row, u, want) => { const got = row.get(u); return !!got && got.size === want.length && want.every(a => got.has(a)); };
+  return F.compounds.has(key + " / " + t) || F.adjacent.has(key + " | " + t) ||
+    (f.u !== f.tail[1] && F.rows.some(r => only(r, f.u, head) && only(r, f.tail[1], [t])));
 }
 // How many dose figures (not times or temperatures) a passage holds, for ranking amount questions.
 export const doseFigures = t => [...String(t).matchAll(new RegExp(FIGURE_SRC, "gi"))].filter(m => !TIME_UNITS.has(unit(m.groups.u))).length;
@@ -213,12 +225,13 @@ const RULES = {
 export const SYSTEM_PROMPT = Object.values(RULES).join(" ");
 // When exact.js shows the source amounts word for word, the model must not write figures at all: a 4B model
 // paraphrasing a dosing table gets them wrong. It frames the answer and points to the sources instead.
-export const exactRule = ns => `Exact amounts: the reader is shown the passages of source${ns.length > 1 ? "s" : ""} ${ns.map(n => `[${n}]`).join(" ")} ` +
-  "that hold the amounts, word for word, next to your answer. So do NOT write any figure yourself: no numbers, doses, amounts, " +
-  "ratios, percentages, temperatures or times, in digits or in words, and never convert or combine them. Instead, in a few short " +
-  "sentences, say which method each source describes, which source [n] gives its amounts, and in words what the amounts depend on " +
-  "(product strength, amount of water, clear, cloudy or cold water, waiting time, treatment or storage). Then tell the reader to " +
-  "use the exact wording shown. If the sources do not answer the question, say so.";
+export const exactRule = ns => { const list = ns.map(n => `[${n}]`).join(" ");
+  return `Exact amounts: the passages of ${list} that hold the amounts are shown to the reader word for word. ` +
+  "So do NOT write any figure yourself: no numbers, doses, amounts, ratios, percentages, temperatures or times, in digits or in " +
+  "words, and never convert or combine them. Instead, briefly say which method each source describes, which " +
+  "source [n] gives its amounts, and in words what they depend on (product strength, amount of water, clear, cloudy or cold water, " +
+  `waiting time, treatment or storage), and tell the reader to use the exact wording shown. Only ${list} ` +
+  `${ns.length > 1 ? "have their" : "has its"} amounts shown: do not say that any other source gives amounts.`; };
 export const exactPrompt = ns => [RULES.role, RULES.only, RULES.cite, exactRule(ns), RULES.style, RULES.au, RULES.food].join(" ");
 
 // A final line or paragraph made only of citations ("[2]", "[1][2]") adds nothing: drop it.

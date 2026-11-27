@@ -335,6 +335,8 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   assert.match(m[0].content, /do NOT write any figure yourself: no numbers, doses, amounts, ratios, percentages, temperatures or times, in digits or in words/);
   assert.match(m[0].content, /never convert or combine them/);
   for (const b of ex) assert.ok(m[0].content.includes(`[${b.n}]`), "names the sources shown");
+  assert.match(m[0].content, /Only (\[\d\] )+have their amounts shown: do not say that any other source gives amounts\./);
+  assert.match(R.exactRule([3]), /Only \[3\] has its amounts shown/);
   assert.doesNotMatch(m[0].content, /give every dose, amount or time exactly/, "no rule asking it to restate amounts");
   assert.match(m[0].content, /If the sources do not contain the answer, say so plainly/);
   assert.match(m[1].content, /Do not write any amounts or times: they are shown to the reader word for word\.$/);
@@ -373,7 +375,17 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   const flatWA = WATER.filter(w => w.f.startsWith("WA-DoH")).map(w => w.t).join(" ").replace(/\s+/g, " ");
   for (const bad of ["10 drops per quart", "5 drops per gallon", "10 drops per gallon", "1/4 teaspoon per quart"])
     assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened table: " + bad);
-  for (const ok of ["5 drops", "1/4 teaspoon", "2 drops per gallon"]) assert.equal(E.guardFigures(ok, flatWA).removed, 0, "flattened: " + ok);
+  for (const ok of ["5 drops", "1/4 teaspoon", "2 drops per gallon", "5 drops per quart", "5 drops per 1 liter", "1/4 teaspoon per gallon",
+    "1/4 teaspoon per 1 gallon", "10 drops per 1/2 gallon", "10 drops per 2 liters", "1 teaspoon per 5 gallons", "2 teaspoons per 10 gallons"])
+    assert.equal(E.guardFigures(ok, flatWA).removed, 0, "flattened: " + ok);
+  for (const bad of ["5 drops per 1/2 gallon", "1/4 teaspoon per 5 gallons", "2 teaspoons per 5 gallons"])
+    assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened, next row: " + bad);
+  // the browser-added version of both pages (rag.js chunkText collapses all whitespace)
+  const flat = WATER.map(w => w.t.replace(/\s+/g, " ")).join("\n");
+  for (const bad of ["10 drops per quart", "20 drops per gallon", "add 10 drops of bleach per gallon", "4 drops per quart"])
+    assert.equal(E.guardFigures(bad, flat).removed, 1, "browser-added: " + bad);
+  for (const ok of ["5 drops per quart", "1/4 teaspoon per gallon", "2GTTS/30 MIN", "4 drops per 30 minutes", "1 minute"])
+    assert.equal(E.guardFigures(ok, flat).removed, 0, "browser-added: " + ok);
   for (const ok of ["5 drops per quart", "10 drops per 2 liters", "10 drops per 1/2 gallon", "1 teaspoon per 5 gallons"])
     assert.equal(E.guardFigures(ok, A).removed, 0, "table row: " + ok);
   for (const bad of ["5 drops per gallon", "10 drops per 1 liter"]) assert.equal(E.guardFigures(bad, A).removed, 1, "rows not mixed: " + bad);
@@ -385,6 +397,13 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   for (const bad of ["1 1/2 teaspoons", "1½ teaspoons"]) assert.equal(E.guardFigures(bad, "Use 1/2 teaspoon.").removed, 1, bad);
   assert.equal(E.guardFigures("1/2 teaspoon", "Use 1/2 teaspoon.").removed, 0);
   assert.deepEqual(E.figures("12/20/2013, 1/4 teaspoon"), ["1/4 teaspoon"]);
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1 1/2 teaspoons.").removed, 0);
+  assert.equal(E.guardFigures("1½ teaspoons", "Add 1 1/2 teaspoons.").removed, 0, "1½ = 1 1/2");
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1½ teaspoons.").removed, 0, "1 1/2 = 1½");
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1/2 teaspoon.").removed, 1);
+  assert.deepEqual(E.figures("2¼ cups"), ["2¼ cups"]);
+  assert.equal(E.guardFigures("add 2¼ cups of bleach", E.allowedText(ex, hits)).removed, 1, "invented 2¼ cups");
+  assert.equal(E.guardFigures("2¼ cups", "Use 2 1/4 cups.").removed, 0);
   // no quadratic backtracking on padded PDF text
   const t0 = Date.now(); E.figures("1" + " ".repeat(20000) + "x"); assert.ok(Date.now() - t0 < 500, "slow regex: " + (Date.now() - t0) + " ms");
   // with no excerpts shown, figures are checked against the sources sent
