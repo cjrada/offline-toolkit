@@ -7,7 +7,10 @@ publishes of different tiers at once could leave it a step behind; the tier file
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --out _site
   python3 tools/build_site.py --public-url https://pub-<id>.r2.dev --index index.json --out _site   # offline
 
-Writes <out>/index.html (one plain page, no JavaScript) and <out>/.nojekyll.
+Writes <out>/index.html and <out>/.nojekyll. The page is plain HTML; the only script is a small inline helper
+for the Support hosting section's copy buttons (the addresses stay selectable text without it). That section
+reads its donation addresses from tools/donate.json and draws their QR codes here, as inline SVG, with the
+stdlib-only encoder below: the deployed page fetches nothing from any other host.
 """
 import argparse, html, json, os, re, sys, time, urllib.error, urllib.request
 
@@ -16,6 +19,247 @@ TIERS = (("small", "~7 GB"), ("medium", "~41 GB"), ("large", "~173 GB"))
 PUBLIC_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~-]+)*")
 KEY_RE = re.compile(r"(small|medium|large)/[0-9A-Za-z_-][0-9A-Za-z._-]{0,63}/[0-9A-Za-z._-]+")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
+DONATE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "donate.json")
+DONATE_ID_RE = re.compile(r"[a-z0-9-]{1,16}")
+DONATE_ADDR_RE = re.compile(r"[A-Za-z0-9]{20,100}")
+
+
+# --- QR code (ISO/IEC 18004), byte mode, error correction level M, versions 1-6, stdlib only ------------------
+# Enough for any donation address (v6-M holds 106 bytes). Follows the structure of Project Nayuki's public QR
+# generator. tests/test_build_site.py decodes the result with its own reader and checks the RS codewords.
+QR_M_BLOCKS = {1: (1, 10), 2: (1, 16), 3: (1, 26), 4: (2, 18), 5: (2, 24), 6: (4, 16)}  # (blocks, ec per block)
+QR_ALIGN = {1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34]}
+
+
+def _gf_mul(x, y):
+    z = 0
+    for i in reversed(range(8)):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z
+
+
+def _rs_ecc(data, degree):
+    div, root = [0] * (degree - 1) + [1], 1
+    for _ in range(degree):
+        for j in range(degree):
+            div[j] = _gf_mul(div[j], root)
+            if j + 1 < degree:
+                div[j] ^= div[j + 1]
+        root = _gf_mul(root, 2)
+    res = [0] * degree
+    for b in data:
+        f = b ^ res.pop(0)
+        res.append(0)
+        for i, c in enumerate(div):
+            res[i] ^= _gf_mul(c, f)
+    return res
+
+
+def _raw_modules(v):
+    n = (16 * v + 128) * v + 64
+    if v >= 2:
+        k = v // 7 + 2
+        n -= (25 * k - 10) * k - 55
+    return n
+
+
+QR_MASKS = (lambda x, y: (x + y) % 2 == 0, lambda x, y: y % 2 == 0, lambda x, y: x % 3 == 0,
+            lambda x, y: (x + y) % 3 == 0, lambda x, y: (x // 3 + y // 2) % 2 == 0,
+            lambda x, y: x * y % 2 + x * y % 3 == 0, lambda x, y: (x * y % 2 + x * y % 3) % 2 == 0,
+            lambda x, y: ((x + y) % 2 + x * y % 3) % 2 == 0)
+
+
+def qr_matrix(text):
+    """The QR code for text (UTF-8, byte mode, level M) as rows of booleans (True = dark), no quiet zone."""
+    data = text.encode("utf-8")
+    for v, (nblocks, necc) in QR_M_BLOCKS.items():
+        ndata = _raw_modules(v) // 8 - nblocks * necc
+        if 4 + 8 + 8 * len(data) <= 8 * ndata:
+            break
+    else:
+        raise ValueError(f"too long for a version 1-6 QR code: {len(data)} bytes")
+    bits = [0, 1, 0, 0] + [(len(data) >> i) & 1 for i in range(7, -1, -1)]
+    bits += [(b >> i) & 1 for b in data for i in range(7, -1, -1)]
+    bits += [0] * min(4, 8 * ndata - len(bits))
+    bits += [0] * (-len(bits) % 8)
+    words = [int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8)]
+    words += [(0xEC, 0x11)[i % 2] for i in range(ndata - len(words))]
+    per = ndata // nblocks  # equal-sized blocks for every version in QR_M_BLOCKS
+    blocks = [words[i * per:(i + 1) * per] for i in range(nblocks)]
+    eccs = [_rs_ecc(b, necc) for b in blocks]
+    stream = [b[i] for i in range(per) for b in blocks] + [e[i] for i in range(necc) for e in eccs]
+
+    size = 4 * v + 17
+    mods = [[False] * size for _ in range(size)]
+    func = [[False] * size for _ in range(size)]
+
+    def put(x, y, dark):
+        mods[y][x], func[y][x] = dark, True
+
+    for i in range(size):
+        put(6, i, i % 2 == 0)
+        put(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (size - 4, 3), (3, size - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                if 0 <= cx + dx < size and 0 <= cy + dy < size:
+                    put(cx + dx, cy + dy, max(abs(dx), abs(dy)) not in (2, 4))
+    al = QR_ALIGN[v]
+    for i, ax in enumerate(al):
+        for j, ay in enumerate(al):
+            if (i, j) not in ((0, 0), (0, len(al) - 1), (len(al) - 1, 0)):
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        put(ax + dx, ay + dy, max(abs(dx), abs(dy)) != 1)
+
+    def put_format(mask):
+        d = mask  # level M's format bits are 00
+        rem = d
+        for _ in range(10):
+            rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+        f = ((d << 10) | rem) ^ 0x5412
+        bit = lambda i: (f >> i) & 1 == 1  # noqa: E731
+        for i in range(6):
+            put(8, i, bit(i))
+        put(8, 7, bit(6))
+        put(8, 8, bit(7))
+        put(7, 8, bit(8))
+        for i in range(9, 15):
+            put(14 - i, 8, bit(i))
+        for i in range(8):
+            put(size - 1 - i, 8, bit(i))
+        for i in range(8, 15):
+            put(8, size - 15 + i, bit(i))
+        put(8, size - 8, True)
+
+    put_format(0)
+    i, right = 0, size - 1
+    while right >= 1:
+        if right == 6:
+            right = 5
+        for vert in range(size):
+            for j in range(2):
+                x = right - j
+                y = size - 1 - vert if ((right + 1) & 2) == 0 else vert
+                if not func[y][x] and i < len(stream) * 8:
+                    mods[y][x] = (stream[i >> 3] >> (7 - (i & 7))) & 1 == 1
+                    i += 1
+        right -= 2
+
+    def masked(m):
+        return [[mods[y][x] ^ (not func[y][x] and QR_MASKS[m](x, y)) for x in range(size)] for y in range(size)]
+
+    best = None
+    for m in range(8):
+        put_format(m)
+        cand = masked(m)
+        score = _penalty(cand)
+        if best is None or score < best[0]:
+            best = (score, m)
+    put_format(best[1])
+    return masked(best[1])
+
+
+def _penalty(g):
+    n, score = len(g), 0
+    lines = g + [list(c) for c in zip(*g)]
+    for row in lines:
+        run = 1
+        for a, b in zip(row, row[1:]):
+            if a == b:
+                run += 1
+            else:
+                score += run - 2 if run >= 5 else 0
+                run = 1
+        score += run - 2 if run >= 5 else 0
+        s = "0000" + "".join("1" if c else "0" for c in row) + "0000"
+        score += 40 * sum(s.count(p) for p in ("00001011101", "10111010000"))
+    for y in range(n - 1):
+        for x in range(n - 1):
+            if g[y][x] == g[y][x + 1] == g[y + 1][x] == g[y + 1][x + 1]:
+                score += 3
+    dark = sum(map(sum, g))
+    score += 10 * (abs(dark * 20 - n * n * 10) // (n * n))
+    return score
+
+
+def qr_svg(text, label):
+    """An inline SVG of text's QR code: dark modules on a white square with a 4-module quiet zone."""
+    g = qr_matrix(text)
+    n, q = len(g), 4
+    path = []
+    for y, row in enumerate(g):
+        x = 0
+        while x < n:
+            if row[x]:
+                w = 1
+                while x + w < n and row[x + w]:
+                    w += 1
+                path.append(f"M{x + q} {y + q}h{w}v1h-{w}z")
+                x += w
+            else:
+                x += 1
+    side = n + 2 * q
+    return (f'<svg class="qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {side} {side}" role="img" '
+            f'aria-label="{html.escape(label, quote=True)}" shape-rendering="crispEdges">'
+            f'<rect width="{side}" height="{side}" fill="#fff"/><path fill="#000" d="{"".join(path)}"/></svg>')
+
+
+def load_donate(path=DONATE_JSON):
+    """The donation addresses from tools/donate.json, validated: [{id, label, network, address}, ...]."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    out = []
+    for a in doc.get("addresses") or []:
+        if not (isinstance(a, dict) and DONATE_ID_RE.fullmatch(str(a.get("id", "")))
+                and DONATE_ADDR_RE.fullmatch(str(a.get("address", ""))) and a.get("label")):
+            raise SystemExit(f"{path}: bad donation entry {a!r} (needs id, label and a plain alphanumeric address)")
+        out.append({k: str(a.get(k, "")) for k in ("id", "label", "network", "address")})
+    if len({a["id"] for a in out}) != len(out):
+        raise SystemExit(f"{path}: donation ids must be unique")
+    return out
+
+
+COPY_JS = """<script>
+document.querySelectorAll("button[data-copy]").forEach(function (b) {
+  b.hidden = false;
+  b.addEventListener("click", function () {
+    var el = document.getElementById(b.getAttribute("data-copy")), text = el.textContent;
+    function select() { var r = document.createRange(), s = window.getSelection(); r.selectNodeContents(el); s.removeAllRanges(); s.addRange(r); }
+    function say(m) { b.textContent = m; setTimeout(function () { b.textContent = "Copy"; }, 2000); }
+    function fallback() { select(); var ok = false; try { ok = document.execCommand("copy"); } catch (e) {} say(ok ? "Copied" : "Selected, press Ctrl+C"); }
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say("Copied"); }, fallback);
+    else fallback();
+  });
+});
+</script>"""
+
+
+def render_support(addresses):
+    """The Support hosting section: what donations are for, then each address as text, a copy button and a QR."""
+    esc = html.escape
+    if not addresses:
+        return ""
+    cards = []
+    for a in addresses:
+        cards.append(f"""<div class="addr">
+{qr_svg(a['address'], f"QR code for the {a['label']} address")}
+<div>
+<h3>{esc(a['label'])}</h3>
+<p class="note">{esc(a['network'])}</p>
+<p><code class="wallet" id="addr-{a['id']}">{esc(a['address'])}</code>
+<button type="button" data-copy="addr-{a['id']}" hidden>Copy</button></p>
+</div>
+</div>""")
+    return f"""<section id="support">
+<h2>Support hosting</h2>
+<p>The kits are free and stay free. If they are useful to you and you would like to chip in, donations help cover
+hosting: Cloudflare R2 storage for the kits and the cost of building and publishing the large ones. Entirely
+optional, and thank you.</p>
+{chr(10).join(cards)}
+<p class="note">Each QR code is just the address shown next to it. Check the address in your wallet before sending.</p>
+</section>"""
 
 
 def public_base(url):
@@ -68,8 +312,9 @@ def gb(n):
     return f"{n / 1e9:,.1f} GB"
 
 
-def render(index, base, built_at=None):
+def render(index, base, built_at=None, donate=None):
     esc = html.escape
+    support = render_support(load_donate() if donate is None else donate)
     tiers = (index or {}).get("tiers") or {}
     out = []
     for tier, approx in TIERS:
@@ -111,6 +356,11 @@ section {{ border-top: 1px solid var(--line); margin-top: 1.5rem; }}
 table {{ border-collapse: collapse; }} th {{ text-align: left; padding-right: 1rem; color: var(--muted); font-weight: normal; vertical-align: top; }}
 code.sha {{ word-break: break-all; font-size: .85em; }} .dl {{ font-size: 1.1rem; }} li {{ margin: .3rem 0; }}
 .note {{ color: var(--muted); }}
+.addr {{ display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; margin: 1rem 0; }}
+.addr h3 {{ margin: 0; }} .addr p {{ margin: .3rem 0; }}
+svg.qr {{ width: 9rem; height: 9rem; flex: none; border: 1px solid var(--line); }}
+code.wallet {{ word-break: break-all; user-select: all; }}
+button {{ font: inherit; font-size: .85em; margin-left: .4rem; }}
 </style>
 </head>
 <body>
@@ -123,8 +373,10 @@ connection and a download manager that can resume. Format the drive exFAT (FAT32
 (Linux/macOS: <code>shasum -a 256 -c</code>), or on Windows PowerShell compare <code>(Get-FileHash &lt;zip&gt;).Hash</code>
 with the first word of the <code>.sha256</code> file.</p>
 {chr(10).join(out)}
+{support}
 <p class="note">Files are served from Cloudflare R2. Manifests: <a href="{esc(base, quote=True)}/latest.json">latest.json</a> ·
 <a href="{esc(base, quote=True)}/index.json">index.json</a>. Page built {built}.</p>
+{COPY_JS if support else ""}
 </body>
 </html>
 """
