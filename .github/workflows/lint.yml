@@ -40,6 +40,8 @@ jobs:
         run: sh tests/test_stop.sh
       - name: kit pages (node, offline) - safe markdown, manuals retrieval and prompt, AI notice, chat page
         run: node tests/test_kit_js.mjs
+      - name: LLM reliability eval harness (node, offline) - cases file, checks, stub AI server, retrieval on the notes
+        run: node tests/test_llm_eval.mjs
       - name: build dependency (libzim, hash-pinned)
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"

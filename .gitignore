@@ -17,3 +17,4 @@ dist/
 *.zip
 __pycache__/
 www/models.json
+eval-results/
