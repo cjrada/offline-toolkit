@@ -217,7 +217,7 @@ Python-free at run time. `www/docs/index.js` holds ~2,200 pre-chunked passages f
 BM25 keyword search in the browser (`www/docs/retrieve.js`: light stemming, so purify / purifying /
 purification match, and a "safe / drinkable water" question also looks for bleach, boiling, chlorine and iodine
 passages), sends the top 6 sources to the local model, each with the next passage of its page (a table is often
-split across two passages; all sources together are sized to the AI's context from `models.json`: ~4,750
+split across two passages; all sources together are sized to the context the AI runs with (llama.cpp `/props`, else `models.json`): ~4,750
 characters at 4096, 9,000 at 8192 and up), and tells it to answer only the question asked, only from these sources, citing
 [n], and to quote any dose or quantity exactly as the source states it (or say that no source gives one).
 Answers render a small, safe markdown subset (`www/md.js`: bold, italics, lists, headings, code; model output

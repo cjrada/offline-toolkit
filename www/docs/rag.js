@@ -47,8 +47,8 @@ $("add").onchange = async e => {
 // ---- ask ----
 $("f").onsubmit = async e => {
   e.preventDefault(); const q = $("q").value.trim(); if(!q) return;
-  // Sources sized to the context the AI runs with now (models.json; 4096 if unknown), so the prompt fits.
-  const ctx = await aiContext("../models.json");
+  // Sources sized to the context the AI runs with now (/props, else models.json, else 4096), so the prompt fits.
+  const ctx = await aiContext(`${location.protocol}//${location.hostname}`);
   const hits = search(ix, q, {maxChars: sourceBudget(ctx, q)});
   $("srcH").hidden = false;
   $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";

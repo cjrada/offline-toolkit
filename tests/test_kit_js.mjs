@@ -323,6 +323,13 @@ await test("chat: 'New chat' while an answer streams drops that answer (no stray
   const t4 = s1.ask("no answer came");
   s1.finish(t4, "");
   assert.deepEqual(s1.history.map(m => m.content), ["new question", "new answer"], "an unanswered question is removed");
+  // a turn asked just before "New chat" (still reading the context size): no longer current, so the page
+  // stops before adding the AI bubble, and finish() drops it
+  const t5 = s1.ask("asked, then New chat at once");
+  assert.equal(s1.isCurrent(t5), true);
+  s1.clear();
+  assert.equal(s1.isCurrent(t5), false);
+  assert.equal(s1.finish(t5, ""), false); assert.deepEqual(s1.history, []);
   stored = "{bad json"; assert.deepEqual(chat.createSession(store).history, []);
   stored = '{"not":"a list"}'; assert.deepEqual(chat.createSession(store).history, []);
 });
@@ -340,9 +347,16 @@ await test("AI status: ready / loading (503) / down, re-checked every 3 s until 
   timers.at(-1)[0](); await step(); assert.equal(el.textContent, "AI: ready"); assert.equal(timers.at(-1)[1], 30000);
   stop(); const n = timers.length; timers.at(-1)[0](); await step(); assert.equal(timers.length, n, "stopped");
   for (const f of ["www/index.html", "www/chat/chat.js"]) assert.match(page(f), /watchAI\(/, f + " polls with watchAI");
-  assert.equal(await AS.aiContext("m", async () => ({json: async () => ({ctx: 8192})})), 8192);
-  assert.equal(await AS.aiContext("m", async () => { throw new Error("x"); }), 4096, "unknown ctx -> 4096");
-  assert.equal(await AS.aiContext("m", async () => ({json: async () => ({})})), 4096);
+  // context: the server's real n_ctx (/props) first, then models.json (may be stale), then 4096
+  const srv = (props, models) => async u => {
+    const v = u.endsWith(":8080/props") ? props : u === "/models.json" ? models : undefined;
+    if (v instanceof Error || v === undefined) throw v || new Error("404 " + u);
+    return {json: async () => v};
+  };
+  assert.equal(await AS.aiContext("http://h", srv({default_generation_settings: {n_ctx: 4096}}, {ctx: 8192})), 4096, "/props wins over a stale models.json");
+  assert.equal(await AS.aiContext("http://h", srv(new Error("old server"), {ctx: 8192})), 8192);
+  assert.equal(await AS.aiContext("http://h", srv({}, {})), 4096);
+  assert.equal(await AS.aiContext("http://h", srv(new Error("x"), new Error("y"))), 4096, "unknown ctx -> 4096");
 });
 await test("context budget: manuals prompt and chat history fit a 4096-token context with the answer", () => {
   // Estimate: 2 characters per token for the whole prompt (prose is ~4; tables and numbers are worse than prose,
@@ -371,8 +385,13 @@ await test("context budget: manuals prompt and chat history fit a 4096-token con
   }
   assert.ok(chat.historyBudget(8192) > chat.historyBudget(4096));
   assert.match(page("www/docs/rag.js"), /search\(ix, q, \{maxChars: sourceBudget\(ctx, q\)\}\)/);
-  assert.match(page("www/docs/rag.js"), /aiContext\("\.\.\/models\.json"\)/);
-  assert.match(page("www/chat/chat.js"), /historyBudget\(await aiContext\("\.\.\/models\.json"\)\)/);
+  assert.match(page("www/docs/rag.js"), /await aiContext\(`\$\{location\.protocol\}\/\/\$\{location\.hostname\}`\)/);
+  assert.match(page("www/chat/chat.js"), /historyBudget\(await aiContext\(base\)\)/);
+  // chat submit: busy (ctl set, Send disabled) BEFORE the first await, and a cleared turn stops there
+  const js = page("www/chat/chat.js"), sub = js.slice(js.indexOf('$("f").onsubmit'));
+  assert.ok(sub.indexOf("ctl = new AbortController()") < sub.indexOf("await "), "busy before the first await");
+  assert.ok(sub.indexOf('$("send").disabled = true') < sub.indexOf("await "));
+  assert.ok(sub.indexOf("if (!session.isCurrent(turn)") < sub.indexOf('bubble("assistant"'), "cleared turn stops before the AI bubble");
 });
 await test("pages use md.js / retrieve.js, no CDN or remote scripts", () => {
   for (const f of ["www/index.html", "www/docs/index.html", "www/chat/index.html"])

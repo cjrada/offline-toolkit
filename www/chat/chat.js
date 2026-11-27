@@ -41,6 +41,7 @@ export function createSession(store){
       save(); return true;
     },
     clear(){ gen++; history = []; save(); },
+    isCurrent(turnGen){ return turnGen === gen; },                                 // false once "New chat" was pressed
   };
 }
 
@@ -68,12 +69,17 @@ if (typeof document !== "undefined") {
   $("stop").onclick = () => ctl && ctl.abort();
   $("q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("f").requestSubmit(); } });
   $("f").onsubmit = async e => {
+    // Busy from the first moment (before any await): a double Enter cannot send twice, and "New chat" can
+    // abort this turn even while the context size is still being read.
     e.preventDefault(); const q = $("q").value.trim(); if (!q || ctl) return;
+    ctl = new AbortController(); $("stop").hidden = false; $("send").disabled = true;
+    const done = () => { ctl = null; $("stop").hidden = true; $("send").disabled = false; $("q").focus(); };
     $("q").value = ""; const turn = session.ask(q); bubble("user", q);
-    const budget = historyBudget(await aiContext("../models.json"));
+    const budget = historyBudget(await aiContext(base));
+    if (!session.isCurrent(turn) || ctl.signal.aborted) { session.finish(turn, ""); done(); return; }   // cleared or stopped meanwhile
     const d = bubble("assistant", ""); d.querySelector(".body").textContent = "Thinking… (on a laptop without a GPU this can take a minute)";
     d.scrollIntoView({block: "end"});
-    let txt = ""; ctl = new AbortController(); $("stop").hidden = false; $("send").disabled = true;
+    let txt = "";
     try {
       const r = await fetch(API, {method: "POST", headers: {"Content-Type": "application/json"}, signal: ctl.signal,
         body: JSON.stringify({messages: messages(session.history, budget), stream: true, temperature: 0.3, max_tokens: ANSWER_TOKENS})});
@@ -83,7 +89,7 @@ if (typeof document !== "undefined") {
         let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
           if (!line.startsWith("data:")) continue; const s = line.slice(5).trim(); if (s === "[DONE]") continue;
           try { txt += JSON.parse(s).choices[0].delta.content || ""; } catch {}
-          setBody(d, "assistant", txt); } }
+          if (session.isCurrent(turn)) setBody(d, "assistant", txt); } }
       if (!txt) d.querySelector(".body").textContent = "The AI returned no answer. Try again.";
     } catch (err) {
       if (err.name === "AbortError") txt += txt ? "\n\n*(stopped)*" : "*(stopped)*";
@@ -91,7 +97,7 @@ if (typeof document !== "undefined") {
       if (txt) setBody(d, "assistant", txt);
     }
     session.finish(turn, txt);   // dropped if "New chat" was pressed meanwhile
-    ctl = null; $("stop").hidden = true; $("send").disabled = false; $("q").focus();
+    done();
   };
 }
 

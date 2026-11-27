@@ -26,10 +26,14 @@ export function watchAI(el, base, {fetchFn = fetch, setTimer = setTimeout} = {})
   return () => { stopped = true; };
 }
 
-// The context size (tokens) the launcher started the AI with, from www/models.json; 4096 (the smallest the
-// kit uses) when unknown, so prompts are sized to fit any start.
+// The context size (tokens) the AI really runs with: llama.cpp's /props (default_generation_settings.n_ctx,
+// same CORS as /health) first; then www/models.json, which the launcher writes but which can be stale (a
+// read-only drive, or start.bat without PowerShell); else 4096, the smallest the kit uses, so prompts fit
+// any start.
 export const DEFAULT_CTX = 4096;
-export async function aiContext(url, fetchFn = fetch){
-  try { const j = await (await fetchFn(url, {cache: "no-store"})).json(); const c = +j.ctx; return c >= 1024 ? c : DEFAULT_CTX; }
-  catch { return DEFAULT_CTX; }
+export async function aiContext(base, fetchFn = fetch, modelsUrl = "/models.json"){
+  const read = async (url, pick) => { try { const c = +pick(await (await fetchFn(url, {cache: "no-store"})).json()); return c >= 1024 ? c : 0; }
+    catch { return 0; } };
+  return await read(`${base}:8080/props`, j => j?.default_generation_settings?.n_ctx ?? j?.n_ctx)
+      || await read(modelsUrl, j => j?.ctx) || DEFAULT_CTX;
 }
