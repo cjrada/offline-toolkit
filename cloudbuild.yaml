@@ -1,23 +1,30 @@
-# Build a MEDIUM or LARGE kit on a big disk and upload it to GCS (create-only), the same way the GitHub
-# runner does for the small kit. There are no Cloud Build GitHub triggers: the protected publish-kit
-# workflow submits this with
+# Build a MEDIUM or LARGE kit on a big disk and publish it to Cloudflare R2, the same way the GitHub runner
+# does for the small kit (tools/publish_r2.py: create-only version, verify, manifests, then retention).
+# There are no Cloud Build GitHub triggers: the protected publish-kit workflow submits this with
 #   gcloud builds submit --no-source --config cloudbuild.yaml \
-#     --substitutions _TIER=medium,_VERSION=<ver>,_COMMIT=<40-hex sha>,_BUCKET=<bucket>
+#     --substitutions _TIER=medium,_VERSION=<ver>,_COMMIT=<40-hex sha>,_BUCKET=<gcs cache bucket>,_R2_BUCKET=<r2 bucket>
+# Substitutions show up in build logs and metadata, so none of them is secret. The R2 credentials come from
+# Secret Manager (availableSecrets below: r2-access-key-id, r2-secret-access-key, r2-account-id, readable by
+# kit-builder only; scripts/setup-gcp.sh) and reach only the cache-pull preflight and the upload step, as
+# environment variables. Nothing echoes them; the publisher never prints them or its Authorization headers.
 # --no-source: nothing is uploaded from the runner. The build clones the public repo at exactly _COMMIT
 # and checks the hash. Images are pinned by digest. Everything downloaded is checked by build_kit.py
 # --frozen. Shell variables are written $$VAR so Cloud Build does not substitute them.
+# GCS (_BUCKET) is only the private download cache now; no kit is uploaded to GCS.
 #
 # Steps (each logs per-item source, size, time and MB/s):
 #   checkout    clone _COMMIT, validate substitutions
-#   cache-pull  check the upload tooling works (fails in minute 1, not after a 5-hour build), then copy the
-#               big pinned files this tier needs from gs://_BUCKET/cache/ (tools/gcs_cache.sh)
+#   cache-pull  preflight the upload (fails in minute 1, not after a 5-hour build): the publisher runs with
+#               the upload step's image and Python, the R2 secrets are set, the token can list the bucket and
+#               _VERSION is not taken yet (publish_r2.py --dry-run, read-only). Then copy the big pinned files
+#               this tier needs from gs://_BUCKET/cache/ (tools/gcs_cache.sh)
 #   fetch       download whatever the cache lacked: aria2c, several connections, Kiwix ZIMs also from the
 #               HTTPS mirrors in Kiwix's metalink; one plain HTTPS stream as the fallback. Every file is
 #               checked against its pinned sha256, cached or not.
 #   cache-push  (runs alongside build) share the newly downloaded, verified files, create-only
 #   build       assemble the kit from the local cache and zip it
 #   gate        fail the build here if fetch or build failed
-#   upload      publish_gcs.py, run with the cloud-sdk image's own Python (it has no python3 on PATH)
+#   upload      publish_r2.py, run with the cloud-sdk image's own Python (it has no python3 on PATH)
 # Cloud Build cancels every running step as soon as one step fails. So fetch and build don't fail their
 # step: they write their exit code to /workspace/<step>.rc and exit 0, which lets cache-push finish sharing
 # whatever was already downloaded and verified (also after a failed fetch or build). The gate step then
@@ -28,6 +35,7 @@ substitutions:
   _VERSION: ""
   _COMMIT: ""
   _BUCKET: ""
+  _R2_BUCKET: ""
   _REPO: https://github.com/cjrada/offline-toolkit.git
 serviceAccount: projects/$PROJECT_ID/serviceAccounts/kit-builder@$PROJECT_ID.iam.gserviceaccount.com
 options:
@@ -35,6 +43,15 @@ options:
   diskSizeGb: 600          # large tier: ~171 GB cache (the kit hard-links it) + ~171 GB zip, plus headroom
   logging: CLOUD_LOGGING_ONLY
 timeout: 43200s
+# A secret without an enabled version fails the build before the first step.
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/r2-access-key-id/versions/latest
+      env: R2_ACCESS_KEY_ID
+    - versionName: projects/$PROJECT_ID/secrets/r2-secret-access-key/versions/latest
+      env: R2_SECRET_ACCESS_KEY
+    - versionName: projects/$PROJECT_ID/secrets/r2-account-id/versions/latest
+      env: R2_ACCOUNT_ID
 steps:
   - id: checkout
     name: gcr.io/cloud-builders/git@sha256:a9f5868e2e7ea196ddd36dd822e3e612fcde84d0728cc35e10039d4ed24a8b6c
@@ -42,11 +59,12 @@ steps:
     args:
       - -ceu
       - |
-        TIER='${_TIER}'; VERSION='${_VERSION}'; COMMIT='${_COMMIT}'; BUCKET='${_BUCKET}'
+        TIER='${_TIER}'; VERSION='${_VERSION}'; COMMIT='${_COMMIT}'; BUCKET='${_BUCKET}'; R2_BUCKET='${_R2_BUCKET}'
         echo "$$TIER" | grep -Eqx 'medium|large|small' || { echo "bad _TIER"; exit 1; }
         echo "$$VERSION" | grep -Eqx '[0-9A-Za-z._-]{1,64}' || { echo "bad _VERSION"; exit 1; }
         echo "$$COMMIT" | grep -Eqx '[0-9a-f]{40}' || { echo "bad _COMMIT"; exit 1; }
         echo "$$BUCKET" | grep -Eqx '[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]' || { echo "bad _BUCKET"; exit 1; }
+        echo "$$R2_BUCKET" | grep -Eqx '[a-z0-9][a-z0-9-]{1,61}[a-z0-9]' || { echo "bad _R2_BUCKET (set the R2_BUCKET repository variable)"; exit 1; }
         git init -q src && cd src
         git fetch -q --depth 1 '${_REPO}' "$$COMMIT"
         git -c advice.detachedHead=false checkout -q FETCH_HEAD
@@ -57,13 +75,17 @@ steps:
     name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
     entrypoint: bash
     dir: src
+    secretEnv: [R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]
+    env: ['R2_BUCKET=${_R2_BUCKET}']
     args:
       - -ceu
       - |
-        # Preflight for the upload step: same image, same interpreter, same script.
+        # Preflight for the upload step: same image, same interpreter, same script, same credentials.
         sh tools/cloudsdk_python.sh -c 'import sys; print("upload python:", sys.executable, sys.version.split()[0])'
-        sh tools/cloudsdk_python.sh tools/publish_gcs.py --help >/dev/null
-        gcloud auth print-access-token >/dev/null && echo "upload credentials: ok"
+        sh tools/cloudsdk_python.sh tools/publish_r2.py --help >/dev/null
+        sh tools/cloudsdk_python.sh tools/publish_r2.py --tier '${_TIER}' --version '${_VERSION}' --dry-run
+        echo "upload credentials (R2, from Secret Manager): ok"
+        gcloud auth print-access-token >/dev/null && echo "cache credentials (GCS): ok"
         sh tools/cloudsdk_python.sh tools/build_kit.py --tier '${_TIER}' --frozen --cache-plan /workspace/cache-plan.txt
         bash tools/gcs_cache.sh pull /workspace/cache-plan.txt '${_BUCKET}' /workspace/cache
   - id: fetch
@@ -120,4 +142,6 @@ steps:
     name: gcr.io/google.com/cloudsdktool/cloud-sdk@sha256:e8394c66f4f66336af311343ff9a84c84521f8c1113ebc8abfe98bab9a155099  # slim
     entrypoint: sh
     dir: src
-    args: [tools/cloudsdk_python.sh, tools/publish_gcs.py, --zip, /workspace/kit.zip, --bucket, '${_BUCKET}', --auth, gcloud]
+    secretEnv: [R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]
+    env: ['R2_BUCKET=${_R2_BUCKET}']
+    args: [tools/cloudsdk_python.sh, tools/publish_r2.py, --zip, /workspace/kit.zip]

@@ -15,11 +15,24 @@ Offline and cheap: parses the workflow file, runs nothing, touches no artifacts 
   no pull_request_target trigger.
 * Gating and visibility (check_gating_and_visibility, run on the real file): the build/publish `if:`
   conditions, permissions and concurrency are exactly as reviewed; dry_run defaults to true; every action
-  is SHA-pinned; only the publish job has an environment or id-token. The run list shows tier, version and
-  dry run vs publish (run-name). Build and publish write a step summary even on failure; the Cloud Build id
-  is recorded by its own step before the wait (project checked before submitting). The auth, gcloud,
-  upload, cloudbuild, cbwait and result steps say if: success() && ... explicitly. A `summary` job runs with if: always() (not limited to
-  main / v*, so it explains skipped runs), with no environment, no permissions, no secrets, no checkout.
+  is SHA-pinned; only the publish job uses gcs-publish (no other job has an environment in this file), and
+  only publish and the pages caller may request id-token. The run list shows tier, version and dry run vs
+  publish (run-name). Build and publish write a step summary even on failure; the Cloud Build id is
+  recorded by its own step before the wait (project checked before submitting). The auth, gcloud, upload,
+  cloudbuild, cbwait and result steps say if: success() && ... explicitly. A `summary` job runs with
+  if: always() (not limited to main / v*, so it explains skipped runs), with no environment, no
+  permissions, no secrets, no checkout, and it does not wait for pages.
+* Secrets and R2 (check_gating_and_visibility): the only secrets.<name> references are R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY and R2_ACCOUNT_ID, only in the publish job; their values reach only the steps
+  that run tools/publish_r2.py (the validation step sees only "!= ''"), never Cloud Build substitutions,
+  outputs or summaries. The validation step checks R2_BUCKET / R2_PUBLIC_URL and the GCS/WIF variables on
+  every run (dry runs too). Small uploads with publish_r2.py (no Google auth); auth/gcloud run for
+  medium/large only. Result links are public R2 URLs from vars.R2_PUBLIC_URL, never storage.googleapis.com.
+* pages (check_pages): publish.yml's pages job only calls .github/workflows/pages.yml after a successful,
+  non-dry-run publish, with contents: read + pages: write + id-token: write and no secrets. pages.yml runs on
+  workflow_dispatch / workflow_call only (main, or a v* tag push via publish-kit), has workflow permissions
+  {}, the github-pages environment, its own concurrency group, SHA-pinned upload-pages-artifact and
+  deploy-pages, and no secrets, Google auth or GCP variables.
 
 Uses a small parser for the block-style YAML subset GitHub workflows use (no PyYAML needed on the
 runner). It raises on anything it does not understand, so an unexpected layout fails the test instead of
@@ -30,6 +43,8 @@ import sys
 from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "publish.yml"
+PAGES = WORKFLOW.with_name("pages.yml")
+R2_SECRETS = {"R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID"}
 SHA_PIN = re.compile(r"@[0-9a-f]{40}$")
 KEY = re.compile(r"""^("[^"]*"|'[^']*'|[^\s"'#\-][^:#]*?|-[^\s:#][^:#]*?)\s*:(?:\s+(.*))?$""")
 
@@ -256,6 +271,11 @@ def job_text(text, job_id):
     return m.group(1) if m else ""
 
 
+def code_only(t):
+    """t without whole-line comments."""
+    return "\n".join(l for l in t.splitlines() if not l.lstrip().startswith("#"))
+
+
 def writes_summary_always(job):
     return any(isinstance(s, dict) and "GITHUB_STEP_SUMMARY" in str(s.get("run", "")) and "always()" in str(s.get("if", ""))
                for s in job.get("steps") or [])
@@ -292,15 +312,51 @@ def check_gating_and_visibility(text):
             continue
         if jid != "publish" and "environment" in job:
             problems.append(f"only the publish job may use an environment, {jid} does")
-        if jid != "publish" and "id-token" in str(job.get("permissions", "")):
-            problems.append(f"only the publish job may request id-token, {jid} does")
+        if jid not in ("publish", "pages") and "id-token" in str(job.get("permissions", "")):
+            problems.append(f"only the publish and pages jobs may request id-token, {jid} does")
+        if "uses" in job and job["uses"] != "./.github/workflows/pages.yml":
+            problems.append(f"{jid}: the only reusable workflow allowed is ./.github/workflows/pages.yml")
+        if "secrets" in job:
+            problems.append(f"{jid}: must not pass secrets to a called workflow")
         for s in job.get("steps") or []:
             if isinstance(s, dict) and "uses" in s and not SHA_PIN.search(str(s["uses"]).split()[0]):
                 problems.append(f"{jid}: action not pinned to a full commit SHA: {s['uses']}")
-    if re.search(r"\bsecrets\.\w", text):
-        problems.append("publish-kit uses no secrets; found a secrets.<name> reference")
-    if "https://storage.googleapis.com" in text:
-        problems.append("the bucket is private: do not link https://storage.googleapis.com URLs")
+
+    # secrets: the three R2 ones, only in the publish job, values only where the publisher runs
+    names = set(re.findall(r"\bsecrets\.(\w+)", text))
+    if names - R2_SECRETS:
+        problems.append(f"the only secrets allowed are {sorted(R2_SECRETS)}; found secrets.{sorted(names - R2_SECRETS)}")
+    for jid in jobs:
+        if jid != "publish" and re.search(r"\bsecrets\s*[.:\[]", code_only(job_text(text, jid))):
+            problems.append(f"only the publish job may reference secrets, {jid} does")
+    if re.search(r"secrets\s*:\s*inherit", text):
+        problems.append("secrets: inherit is not allowed")
+    psteps = [s for s in publish.get("steps") or [] if isinstance(s, dict)]
+    value_steps = set()
+    for st in psteps:
+        blob = str(st.get("env", "")) + str(st.get("run", "")) + str(st.get("with", "")) + str(st.get("if", ""))
+        refs = re.findall(r"secrets\.\w+[^}]*", blob)
+        if not refs:
+            continue
+        if all(re.fullmatch(r"secrets\.\w+ != ''\s*", r) for r in refs):
+            continue  # only "is it set"
+        value_steps.add(st.get("id"))
+        if "tools/publish_r2.py" not in str(st.get("run", "")):
+            problems.append(f"publish step {st.get('id')!r} gets an R2 secret value but does not run tools/publish_r2.py")
+        if re.search(r"GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|::notice|echo .*\$R2_(SECRET|ACCESS|ACCOUNT)", str(st.get("run", ""))):
+            problems.append(f"publish step {st.get('id')!r} has R2 secrets and writes outputs/summaries/env or echoes them")
+        if "secrets." in str(st.get("run", "")) or "secrets." in str(st.get("with", "")):
+            problems.append(f"publish step {st.get('id')!r}: pass secrets via env only")
+    if value_steps != {"check", "upload"}:
+        problems.append(f"R2 secret values must reach exactly the check and upload steps, got {sorted(map(str, value_steps))}")
+    for o, v in (publish.get("outputs") or {}).items():
+        if "secrets" in str(v):
+            problems.append(f"publish output {o} must not come from secrets")
+    for bad in ("https://storage.googleapis.com", "storage.cloud.google.com", "console.cloud.google.com/storage"):
+        if bad in text:
+            problems.append(f"kits are downloaded from R2: do not link {bad} URLs")
+    if "publish_gcs.py" in text:
+        problems.append("kits are published to R2: publish.yml must not run tools/publish_gcs.py")
 
     # run list: tier, version, dry run vs publish
     rn = str(wf.get("run-name", ""))
@@ -334,15 +390,79 @@ def check_gating_and_visibility(text):
     if not (check_at and submit_at and check_at[0] < submit_at[0]):
         problems.append("the cloudbuild step must check the derived project before gcloud builds submit")
     res = steps.get("result") or {}
-    if "::notice" not in str(res.get("run", "")) or "console.cloud.google.com" not in str(res.get("run", "")):
-        problems.append("publish job must record console links and a ::notice for a published kit (id: result)")
+    rrun = str(res.get("run", ""))
+    if "::notice" not in rrun or "vars.R2_PUBLIC_URL" not in str(res.get("env", "")):
+        problems.append("publish job must record public R2 links (from vars.R2_PUBLIC_URL) and a ::notice (id: result)")
+    for line in ("zip_url=$base/$key", "sha256_url=$base/$key.sha256", "kit_info_url=$base/", "latest_url=$base/$TIER/latest.json", "pages_url="):
+        if line not in rrun:
+            problems.append(f"result step must write {line}...")
+    if "console.cloud.google.com" in rrun or "gs://" in rrun or "gcloud" in rrun:
+        problems.append("result step must not link GCS or need Google credentials")
+    if "console.cloud.google.com/cloud-build" not in str(cb.get("run", "")):
+        problems.append("the cloudbuild step must keep the Cloud Build console link")
     outs = publish.get("outputs") or {}
-    for o in ("tier", "version", "dry_run", "gs_uri", "zip_url", "sha256_url", "kit_info_url", "latest_url", "cloud_build_id", "cloud_build_url"):
+    for o in ("tier", "version", "dry_run", "zip_url", "sha256_url", "kit_info_url", "latest_url", "pages_url", "cloud_build_id", "cloud_build_url"):
         if o not in outs:
             problems.append(f"publish job must export output {o!r} for the summary job")
     for o in ("tier", "version", "dry_run", "zip_name", "sha256", "size"):
         if o not in (build.get("outputs") or {}):
             problems.append(f"build job must export output {o!r} for the summary job")
+
+    # R2 configuration is validated on every publish-job run, dry runs included; GCS/WIF too
+    cfg = steps.get("cfg") or {}
+    crun, cenv = str(cfg.get("run", "")), cfg.get("env") or {}
+    if "tools/publish_r2.py --check-config" not in crun or cfg.get("if"):
+        problems.append("the cfg step must run tools/publish_r2.py --check-config on every run")
+    for v, want in (("R2_BUCKET", "${{ vars.R2_BUCKET }}"), ("R2_PUBLIC_URL", "${{ vars.R2_PUBLIC_URL }}"),
+                    ("GCS_BUCKET", "${{ vars.GCS_BUCKET }}"), ("GCP_WIF_PROVIDER", "${{ vars.GCP_WIF_PROVIDER }}"),
+                    ("GCP_SERVICE_ACCOUNT", "${{ vars.GCP_SERVICE_ACCOUNT }}")):
+        if cenv.get(v) != want:
+            problems.append(f"cfg step must validate {v} from {want}")
+    for name in sorted(R2_SECRETS):
+        if cenv.get(f"HAS_{name}") != f"${{{{ secrets.{name} != '' }}}}":
+            problems.append(f"cfg step must check that secret {name} is set (HAS_{name})")
+    if "gcs-publish environment secret" not in crun or "repository secret" in crun:
+        problems.append("cfg step must tell Chris to keep the R2 secrets in the gcs-publish environment, not the repository")
+    if "for v in GCS_BUCKET GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT" not in crun:
+        problems.append("cfg step must still require the gcs-publish variables")
+    chk = steps.get("check") or {}
+    if chk.get("if") or "--dry-run" not in str(chk.get("run", "")) or "tools/publish_r2.py" not in str(chk.get("run", "")):
+        problems.append("the check step must run publish_r2.py --dry-run for every tier, dry runs included")
+    up = steps.get("upload") or {}
+    if "python3 -I tools/publish_r2.py --zip" not in str(up.get("run", "")) or "--dry-run" in str(up.get("run", "")):
+        problems.append("the small upload step must publish with tools/publish_r2.py")
+    if "tier == 'small'" not in norm(up.get("if")) or "dry_run != 'true'" not in norm(up.get("if")):
+        problems.append("the upload step must run only for small and not on a dry run")
+    for sid in ("auth", "gcloud"):
+        c = norm((steps.get(sid) or {}).get("if"))
+        if "tier != 'small'" not in c or "dry_run != 'true'" not in c:
+            problems.append(f"{sid} must run only for medium/large real publishes (small uploads to R2 without Google)")
+    crun_cb = str(cb.get("run", ""))
+    subs = re.search(r'--substitutions "([^"]*)"', crun_cb)
+    if not subs or subs.group(1) != "_TIER=$TIER,_VERSION=$VERSION,_COMMIT=$COMMIT,_BUCKET=$GCS_BUCKET,_R2_BUCKET=$R2_BUCKET":
+        problems.append(f"Cloud Build substitutions must be exactly the non-secret _TIER,_VERSION,_COMMIT,_BUCKET,_R2_BUCKET, "
+                        f"got {subs.group(1) if subs else None!r}")
+    if "secrets." in str(cb.get("env", "")) or "secrets." in str(wait.get("env", "")):
+        problems.append("Cloud Build steps must not get secrets")
+
+    # pages caller
+    pg = jobs.get("pages")
+    if not isinstance(pg, dict):
+        problems.append("expected a 'pages' job that calls .github/workflows/pages.yml")
+    else:
+        if pg.get("uses") != "./.github/workflows/pages.yml" or pg.get("needs") != "publish":
+            problems.append("pages job must need publish and call ./.github/workflows/pages.yml")
+        if pg.get("permissions") != {"contents": "read", "pages": "write", "id-token": "write"}:
+            problems.append(f"pages job permissions must be contents: read, pages: write, id-token: write, got {pg.get('permissions')!r}")
+        c = norm(pg.get("if"))
+        for need in ("!cancelled()", "needs.publish.result == 'success'", "needs.publish.outputs.published == 'true'",
+                     "needs.publish.outputs.dry_run != 'true'", "github.repository == 'cjrada/offline-toolkit'"):
+            if need not in c:
+                problems.append(f"pages job must run only after a successful real publish (missing {need!r})")
+        raw = code_only(job_text(text, "pages"))
+        for bad in ("secrets", "GCP_", "google-github-actions", "gcs-publish"):
+            if bad in raw:
+                problems.append(f"pages job must not reference {bad}")
 
     # overall summary job
     summ = jobs.get("summary")
@@ -356,6 +476,8 @@ def check_gating_and_visibility(text):
     needs = str(summ.get("needs", ""))
     if "build" not in needs or "publish" not in needs:
         problems.append(f"summary job must need build and publish, got {needs!r}")
+    if "pages" in needs:
+        problems.append("summary job must not wait for the pages job")
     if "environment" in summ:
         problems.append("summary job must not use an environment")
     if str(summ.get("permissions")) != "{}":
@@ -368,6 +490,147 @@ def check_gating_and_visibility(text):
         problems.append("summary job must write $GITHUB_STEP_SUMMARY with both jobs' results")
     if "not main or a v* tag" not in raw:
         problems.append("summary job must explain why build/publish are skipped on other refs")
+    if "needs.publish.outputs.zip_url" not in raw or "needs.publish.outputs.pages_url" not in raw or "public download" not in raw:
+        problems.append("summary job must show the public R2 download links and the downloads page")
+    return problems
+
+
+# ---------------- a tiny evaluator for GitHub `if:` expressions (the subset these workflows use) ----------------
+TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\)|,)|'((?:[^']|'')*)'|([A-Za-z_][A-Za-z0-9_.-]*))")
+
+
+def eval_if(expr, ctx):
+    """Evaluate expr with ctx {"github.ref": ..., ...}. Supports ||, &&, !, ==, !=, parentheses, string
+    literals, context names and startsWith(a, b). Raises ValueError on anything else."""
+    toks, pos, expr = [], 0, expr.strip()
+    while pos < len(expr):
+        m = TOKEN.match(expr, pos)
+        if not m or m.end() == pos:
+            raise ValueError(f"cannot read {expr[pos:]!r}")
+        op, lit, name = m.groups()
+        toks.append(("op", op) if op else ("str", lit.replace("''", "'")) if lit is not None else ("name", name))
+        pos = m.end()
+    i = 0
+
+    def peek():
+        return toks[i] if i < len(toks) else (None, None)
+
+    def take(kind=None, val=None):
+        nonlocal i
+        t = peek()
+        if (kind and t[0] != kind) or (val and t[1] != val):
+            raise ValueError(f"expected {val or kind}, got {t}")
+        i += 1
+        return t
+
+    def orx():
+        v = andx()
+        while peek() == ("op", "||"):
+            take(); w = andx(); v = v or w
+        return v
+
+    def andx():
+        v = cmp()
+        while peek() == ("op", "&&"):
+            take(); w = cmp(); v = v and w
+        return v
+
+    def cmp():
+        v = unary()
+        if peek() in (("op", "=="), ("op", "!=")):
+            op = take()[1]; w = unary()
+            return (v == w) if op == "==" else (v != w)
+        return v
+
+    def unary():
+        if peek() == ("op", "!"):
+            take(); return not unary()
+        if peek() == ("op", "("):
+            take(); v = orx(); take("op", ")"); return v
+        kind, val = take()
+        if kind == "str":
+            return val
+        if kind == "name" and peek() == ("op", "("):
+            take(); a = orx(); take("op", ","); b = orx(); take("op", ")")
+            if val != "startsWith":
+                raise ValueError(f"unsupported function {val}")
+            return str(a).lower().startswith(str(b).lower())
+        if kind == "name":
+            if val not in ctx:
+                raise ValueError(f"unknown name {val}")
+            return ctx[val]
+        raise ValueError(f"unexpected {val}")
+
+    v = orx()
+    if i != len(toks):
+        raise ValueError(f"trailing {toks[i:]}")
+    return v
+
+
+# (event as the called workflow sees it, ref, should deploy). A called workflow's github context is the
+# caller's, so after a tag publish event_name may read push (GitHub's docs) or workflow_call; accept both.
+PAGES_CASES = [
+    ("workflow_dispatch", "refs/heads/main", True),
+    ("workflow_dispatch", "refs/tags/v1.0.0", False),
+    ("workflow_dispatch", "refs/heads/feature", False),
+    ("workflow_call", "refs/heads/main", True),
+    ("workflow_call", "refs/tags/v1.0.0", True),
+    ("push", "refs/tags/v1.0.0", True),
+    ("workflow_call", "refs/heads/feature", False),
+    ("workflow_call", "refs/tags/x1", False),
+    ("push", "refs/heads/feature", False),
+]
+
+
+def check_pages(text):
+    """Static checks for .github/workflows/pages.yml."""
+    try:
+        wf = parse_yaml(text)
+    except ValueError as e:
+        return [f"cannot parse pages.yml: {e}"]
+    problems = []
+    on = wf.get("on")
+    if not isinstance(on, dict) or set(on) != {"workflow_dispatch", "workflow_call"}:
+        problems.append(f"pages.yml triggers must be exactly workflow_dispatch and workflow_call, got {on!r}")
+    if str(wf.get("permissions")) != "{}":
+        problems.append("pages.yml workflow permissions must be {}")
+    jobs = wf.get("jobs") or {}
+    if list(jobs) != ["deploy"]:
+        return problems + [f"pages.yml must have exactly one job 'deploy', got {list(jobs)}"]
+    job = jobs["deploy"]
+    if job.get("permissions") != {"contents": "read", "pages": "write", "id-token": "write"}:
+        problems.append(f"pages deploy permissions must be contents: read, pages: write, id-token: write, got {job.get('permissions')!r}")
+    env = job.get("environment")
+    if not (isinstance(env, dict) and env.get("name") == "github-pages"):
+        problems.append(f"pages deploy must use the github-pages environment, got {env!r}")
+    conc = job.get("concurrency") or {}
+    if not (isinstance(conc, dict) and conc.get("group") == "pages-deploy" and is_false(conc.get("cancel-in-progress"))):
+        problems.append(f"pages deploy needs its own concurrency group (pages-deploy, no cancel), got {conc!r}")
+    c = norm(job.get("if"))
+    if "github.event_name == 'push'" in c:
+        problems.append("pages deploy must not require event_name == 'push' for tags: a called workflow sees the "
+                        "caller's event, so key the tag case on excluding workflow_dispatch instead of on push")
+    try:
+        for event, ref, want in PAGES_CASES:
+            for repo, ok in (("cjrada/offline-toolkit", want), ("someone/fork", False)):
+                got = eval_if(c, {"github.repository": repo, "github.ref": ref, "github.event_name": event})
+                if bool(got) != ok:
+                    problems.append(f"pages deploy if: gives {bool(got)} for {event} on {ref} in {repo}, expected {ok} "
+                                    "(manual runs: main only; publish-kit's call: main and v* tags; this repo only)")
+    except ValueError as e:
+        problems.append(f"pages deploy if: cannot be evaluated ({e}): {c!r}")
+    used = [str(st.get("uses", "")).split("@")[0] for st in job.get("steps") or [] if isinstance(st, dict) and "uses" in st]
+    if used != ["actions/checkout", "actions/upload-pages-artifact", "actions/deploy-pages"]:
+        problems.append(f"pages deploy must use checkout, upload-pages-artifact, deploy-pages, got {used}")
+    for st in job.get("steps") or []:
+        if isinstance(st, dict) and "uses" in st and not SHA_PIN.search(str(st["uses"]).split()[0]):
+            problems.append(f"pages.yml: action not pinned to a full commit SHA: {st['uses']}")
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    for bad in ("secrets", "google-github-actions", "GCP_", "gcloud", "gcs-publish", "pull_request"):
+        if bad in code:
+            problems.append(f"pages.yml must not reference {bad}")
+    if "tools/build_site.py" not in code or "vars.R2_PUBLIC_URL" not in code:
+        problems.append("pages.yml must build the page with tools/build_site.py from vars.R2_PUBLIC_URL")
     return problems
 
 
@@ -387,9 +650,41 @@ def mutation_test(text):
         "id-token", "summary id-token")
     bad("        type: boolean\n        default: true\n", "        type: boolean\n        default: false\n", "dry_run", "dry_run default")
     bad("      (github.event_name == 'push' || inputs.tier == 'small')\n", "      true\n", "build job if", "build if changed")
-    bad("      !cancelled() &&\n", "      always() &&\n", "publish job if", "publish if changed")
+    pub_if = ("      !cancelled() &&\n      github.repository == 'cjrada/offline-toolkit' &&\n"
+              "      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&\n      (needs.build.result")
+    bad(pub_if, pub_if.replace("!cancelled()", "always()"), "publish job if", "publish if changed")
     bad("concurrency:\n  group: publish-kit-${{ github.ref }}\n", "concurrency:\n  group: publish-kit\n", "concurrency", "concurrency")
     bad("        id: cloudbuild\n", "        id: submit\n", "Cloud Build", "cloudbuild id renamed")
+    # secrets
+    bad("      - name: Free disk space\n", "      - name: Free disk space\n        env:\n          K: ${{ secrets.R2_ACCOUNT_ID }}\n",
+        "only the publish job may reference secrets", "secret in build job")
+    bad("          ACTOR: ${{ github.actor }}\n", "          ACTOR: ${{ github.actor }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n",
+        "summary job must not reference secrets", "secret in summary job")
+    bad("          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          BUILD_SHA256:",
+        "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          K: ${{ secrets.R2_ACCESS_KEY_ID }}\n          BUILD_SHA256:",
+        "does not run tools/publish_r2.py", "secret in result step")
+    bad("          COMMIT: ${{ github.sha }}\n", "          COMMIT: ${{ github.sha }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n",
+        "Cloud Build steps must not get secrets", "secret in cloudbuild step")
+    bad(",_R2_BUCKET=$R2_BUCKET\")", ",_R2_BUCKET=$R2_BUCKET,_KEY=$R2_SECRET_ACCESS_KEY\")", "substitutions", "secret substitution")
+    bad("HAS_R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID != '' }}", "HAS_R2_ACCOUNT_ID: ${{ secrets.GITHUB_TOKEN != '' }}",
+        "the only secrets allowed", "other secret")
+    bad("    uses: ./.github/workflows/pages.yml\n", "    uses: ./.github/workflows/pages.yml\n    secrets: inherit\n",
+        "secrets", "secrets: inherit")
+    # R2 config validation and the R2 upload
+    bad("          python3 -I tools/publish_r2.py --check-config --no-secrets\n", "", "--check-config", "R2 config check removed")
+    bad("          R2_BUCKET: ${{ vars.R2_BUCKET }}\n          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          # Only whether",
+        "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          # Only whether", "R2_BUCKET", "R2_BUCKET not validated")
+    bad('        run: python3 -I tools/publish_r2.py --zip "$ZIP"\n', '        run: python3 tools/publish_gcs.py --zip "$ZIP"\n',
+        "publish_r2.py", "upload back to GCS")
+    m = re.search(r"(?m)^        id: auth\n        if: (.*)\n", text)
+    bad(m.group(0), m.group(0).replace(" && steps.cfg.outputs.tier != 'small'", ""), "auth must run only", "auth for small")
+    bad('            echo "zip_url=$base/$key"\n', '            echo "zip_url=https://storage.googleapis.com/b/$key"\n',
+        "storage.googleapis.com", "GCS download link")
+    # pages
+    bad("      needs.publish.outputs.dry_run != 'true'\n", "      true\n", "pages job must run only", "pages on dry run")
+    bad("    needs: [build, publish]\n", "    needs: [build, publish, pages]\n", "must not wait for the pages", "summary waits for pages")
+    bad("      pages: write\n      id-token: write  # deploy-pages only", "      pages: write\n      id-token: write\n      actions: write  # deploy-pages only",
+        "pages job permissions", "pages permissions widened")
     for sid in ("result", "cbwait", "upload", "auth"):
         m = re.search(rf"(?m)^        id: {sid}\n        if: success\(\) && ", text)
         assert m, f"{sid}: expected 'if: success() && ' right after its id"
@@ -479,12 +774,46 @@ def main():
         "removing skip-decompress from publish.yml was not detected"
     problems += check_gating_and_visibility(text)
     mutation_test(text)
+    pages = PAGES.read_text(encoding="utf-8")
+    pages_problems = check_pages(pages)
+    for old_s, new_s, needle in (
+            ("  workflow_call:\n", "  workflow_call:\n  pull_request:\n", "triggers"),
+            ("      name: github-pages\n", "      name: gcs-publish\n", "github-pages"),
+            ("      group: pages-deploy\n", "      group: other\n", "concurrency"),
+            ("          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n", "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n", "secrets"),
+            ("@368f82528645a54fb793d4d04e342629a3f51346", "@v5", "full commit SHA"),
+            ("    if: >-\n      github.repository == 'cjrada/offline-toolkit' &&\n", "    if: >-\n", "someone/fork"),
+            # the tag clause this replaces: it keyed the tag case on the caller's event being push; keep the rule
+            # that it must not be required, so the condition never depends on how a called run reports its event
+            ("(startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch')",
+             "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))", "event_name == 'push'"),
+            # tag clause dropped: a v* tag publish would not update the page
+            (" || (startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch')", "",
+             "workflow_call on refs/tags/v1.0.0"),
+            # manual runs from a tag allowed
+            (" && github.event_name != 'workflow_dispatch'", "", "workflow_dispatch on refs/tags/v1.0.0"),
+            # any branch allowed
+            ("github.ref == 'refs/heads/main' ||", "startsWith(github.ref, 'refs/heads/') ||", "refs/heads/feature")):
+        assert pages.count(old_s) == 1, f"pages.yml: {old_s!r}"
+        got = check_pages(pages.replace(old_s, new_s))
+        assert any(needle in p for p in got), f"pages.yml mutation {needle!r} not caught: {got}"
+    problems += [f"(pages.yml) {p}" for p in pages_problems]
+    # Docs: the R2 secrets belong to the gcs-publish environment, never the repository.
+    root = WORKFLOW.parents[2]
+    for doc in ("docs/SETUP.md", "README.md", "scripts/setup-gcp.sh"):
+        t = (root / doc).read_text(encoding="utf-8")
+        if "gcs-publish" not in t or not re.search(r"gcs-publish(`)? environment( secrets|\s*\(Settings)", t):
+            problems.append(f"{doc} must say the R2 secrets are gcs-publish environment secrets")
+        if re.search(r"(?i)(set|add|store|keep)[^.\n]{0,40}repository secrets? `?R2_", t):
+            problems.append(f"{doc} must not tell anyone to store the R2 secrets as repository secrets")
     if problems:
         for p in problems:
             print(f"FAIL {WORKFLOW.relative_to(WORKFLOW.parents[2])}: {p}")
         return 1
     print("OK: publish.yml hands the kit zip over with archive: false and downloads it with skip-decompress: true")
     print("OK: gating unchanged; run-name, job summaries and the always-running summary job are in place")
+    print("OK: only the publish job reads the three R2 secrets, only for publish_r2.py; links are public R2 URLs")
+    print("OK: pages job and pages.yml deploy only after a real publish, without secrets, in github-pages")
     return 0
 
 

@@ -18,10 +18,14 @@ jobs:
         run: python3 -m py_compile tools/*.py tests/*.py
       - name: setup-gcp static checks (explicit IAM conditions, no prompts)
         run: python3 tests/test_setup_gcp.py
-      - name: publish-kit workflow static checks (zip hand-off, gating, run summary)
+      - name: publish-kit and pages workflow static checks (zip hand-off, gating, secrets, run summary)
         run: python3 tests/test_publish_workflow.py
-      - name: cloudbuild.yaml static checks (pinned images, upload python, cache steps)
+      - name: cloudbuild.yaml static checks (pinned images, upload python, Secret Manager, cache steps)
         run: python3 tests/test_cloudbuild.py
+      - name: R2 publisher and retention (fake S3, offline)
+        run: python3 tests/test_publish_r2.py
+      - name: downloads page generator (offline)
+        run: python3 tests/test_build_site.py
       - name: GCS download cache and cloud-sdk python wrapper (stub gcloud)
         run: sh tests/test_gcs_cache.sh
       - name: model auto-selection tests (sh and PowerShell)
@@ -36,7 +40,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes --only-binary ':all:' -r tools/requirements-build.txt
-      - name: build-kit and publisher tests (offline)
+      - name: build-kit and GCS publisher tests (offline)
         run: |
           "$RUNNER_TEMP/venv/bin/python" tests/test_build_kit.py
           "$RUNNER_TEMP/venv/bin/python" tests/test_publish_gcs.py

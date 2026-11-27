@@ -8,19 +8,25 @@ No install, no internet, no accounts. Everything runs on `localhost` in your web
 
 ## Get a kit onto a drive
 
-Prebuilt kits live in a private Google Cloud Storage bucket (set up with `scripts/setup-gcp.sh`, see
-[docs/SETUP.md](docs/SETUP.md)). With the Google Cloud CLI (`gcloud auth login` first):
+**Download a prebuilt kit from <https://cjrada.github.io/offline-toolkit/>.** The page lists the latest
+small, medium and large kit (version, date, size, sha256) and the previous versions still kept. The files
+themselves are served from Cloudflare R2, with no account or sign-in. They are big: small ~7 GB,
+medium ~41 GB, large ~173 GB, so use a fast connection and a download manager that can resume.
+
+Download the `.zip` and its `.sha256` file into the same folder and check it before you unzip:
 
 ```sh
-B=gs://offline-toolkit-kits                         # your bucket
-gcloud storage cat $B/kits/small/latest.json        # shows "version" and "zip"
-V=<version from latest.json>
-gcloud storage cp "$B/kits/small/$V/offline-toolkit-small-$V.zip" "$B/kits/small/$V/offline-toolkit-small-$V.zip.sha256" .
-sha256sum -c offline-toolkit-small-$V.zip.sha256    # must print: OK
+sha256sum -c offline-toolkit-small-<version>.zip.sha256    # must print: OK   (macOS: shasum -a 256 -c ...)
 ```
 
-On Windows (PowerShell), check the hash with `(Get-FileHash offline-toolkit-small-$V.zip).Hash` and
+On Windows (PowerShell), check the hash with `(Get-FileHash offline-toolkit-small-<version>.zip).Hash` and
 compare it with the first word of the `.sha256` file.
+
+The same files are listed by machine-readable manifests next to them on R2: `latest.json` (newest of each
+tier), `index.json` (every kept version), and `<tier>/latest.json` / `<tier>/index.json`. How kits are
+built and published: [docs/SETUP.md](docs/SETUP.md). (Publishing needs an R2 token, kept only as
+`gcs-publish` environment secrets so it is released only behind that environment's approval on `main` or
+a `v*` tag; it is never a repository secret.)
 
 1. **Format the drive exFAT.** FAT32 cannot hold files over 4 GB (models and ZIMs are bigger), and NTFS is
    awkward on some Linux systems. Windows: right-click the drive → Format → exFAT. Linux: `sudo mkfs.exfat -n KIT /dev/sdX1`.
@@ -155,10 +161,13 @@ www/maps/                    australia.pmtiles (2.2 GB, all of Australia to stre
 tools/build_index.py         rebuild the manuals index (needs python3 + pdftotext; only for rebaking)
 tools/pick-model.sh / .ps1   automatic model choice used by start.sh / start.bat
 tools/build_kit.py           builds the whole kit from tools/kit-manifest.json (hash-pinned downloads)
-tools/publish_gcs.py         uploads a built kit zip to Google Cloud Storage (create-only; used by CI and Cloud Build)
-tools/gcs_cache.sh           Cloud Build's shared download cache in the kit bucket (hash-checked, create-only)
-tools/cloudsdk_python.sh     runs publish_gcs.py with the cloud-sdk image's own Python
-scripts/setup-gcp.sh         one-time, re-runnable GCP setup (bucket, Workload Identity Federation, service accounts)
+tools/publish_r2.py          publishes a built kit zip to Cloudflare R2 (create-only versions, verify, manifests, retention 3/2/1)
+tools/build_site.py          builds the GitHub Pages downloads page from the public R2 manifests
+tools/publish_gcs.py         the old GCS uploader (no longer used for kits; kept with its tests)
+tools/gcs_cache.sh           Cloud Build's shared download cache in the private GCS bucket (hash-checked, create-only)
+tools/cloudsdk_python.sh     runs publish_r2.py with the cloud-sdk image's own Python
+scripts/setup-gcp.sh         one-time, re-runnable GCP setup (cache bucket, Workload Identity Federation, service accounts,
+                             Secret Manager secrets for R2)
 cloudbuild.yaml              medium/large kit builds on Cloud Build (submitted by the publish-kit workflow)
 tools/download-extras.sh     commented download list for one-off Medium/Large additions
 KIT-INFO.json, SHA256SUMS    what was built, from which commit, with the hash of every file
@@ -283,5 +292,5 @@ and an NVIDIA/AMD GPU (if present) is used automatically. Bigger models also dra
   * llamafile (Apache-2.0), llama.cpp (MIT; `bin/llama-vulkan/LICENSE-llama.cpp`, plus LLVM OpenMP's
     licence for `libomp.dll`), kiwix-tools (GPL-3.0), miniserve (MIT). Models: Qwen3 (Apache-2.0); Gemma (Gemma terms); Llama-based models (Llama licence).
   * Hesperian books inside the zimgit medicine ZIM (e.g. "Where There Is No Doctor"): free for personal/non-profit use.
-  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`build_kit.py --with post-disaster`), marks the kit `"redistributable": false`, and `publish_gcs.py` refuses to upload such a kit.
+  * **Do not redistribute commercial books.** The zimgit post-disaster ZIM contains some, so it stays opt-in (`build_kit.py --with post-disaster`), marks the kit `"redistributable": false`, and `publish_r2.py` refuses to upload such a kit.
 * `www/docs/notes/Australia-first-aid-and-emergency-notes.txt` is **not medical advice** - check current ANZCOR / St John / Red Cross guidance.
