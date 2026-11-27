@@ -20,10 +20,16 @@
 //   4. renderAnswer(): every figure in the model's answer that is not in the sources sent (same number(s) and unit,
 //      however written: "one full minute" = "1 minute", "5.25% to 8.25%" = "5.25-8.25 percent"; a "per" figure must be
 //      in the sources as such or as one table row) is removed and marked, with a caution under the answer.
+//   5. Before that, the dose guard (dose.js): a dose (drops, teaspoons, tablespoons, tablets) must also match one source
+//      fact on its volume of water, clear / cloudy / cold water, strength and agent. "For a gallon of water add 10 drops
+//      of bleach" passes the figure check ("10 drops" and "1 gallon" are each in the WA DoH table) but not this one:
+//      10 drops is that table's figure for 1/2 gallon. This runs on every answer, amount question or not.
 //   Retrieval (retrieve.js scoreAll) also ranks passages with dose figures higher for amount questions.
 
 import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
+import {checkDoses, markSpans} from "./dose.js";
+import {medicineDoseQuestion, medicineDoseIn, medicinesIn, doseSubjectWords, sourceDoseNote, NOT_COVERED} from "../medicine.js";
 
 export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
@@ -54,7 +60,7 @@ export const LIMITS = {sources: 4, chars: 2200, leadIn: 3, leadChars: 240, gap: 
 
 // The verbatim excerpts for q: [{n, hit, excerpts: [string]}] (n = the source's number in the answer), or [].
 export function extractExact(ix, q, hits){
-  if (!quantityQuestion(q)) return [];
+  if (!quantityQuestion(q) && !medicineDoseQuestion(q)) return [];
   const qt = queryTerms(q), N = Math.max(1, ix.chunks.length);
   const topic = [...qt].filter(([t]) => !GENERIC.has(t) && !/^\d+$/.test(t));
   // idf, at least 1: in a small library (a few PDFs added in the browser) every word is "common"
@@ -109,7 +115,8 @@ export function renderExact(blocks, title, where, link){
 }
 
 // The text the answer's figures are checked against: all the sources sent (the excerpts shown are slices of them).
-export const allowedText = (blocks, hits) => [...hits.map(h => h.t), ...blocks.flatMap(b => b.excerpts)].join("\n");
+// A blank line between sources: the dose guard reads each on its own (one source's bleach strength is not another's).
+export const allowedText = (blocks, hits) => [...hits.map(h => h.t), ...blocks.flatMap(b => b.excerpts)].join("\n\n");
 
 // Figures in the answer that are not in `allowed` (same numbers and unit, however written: see retrieve.js
 // figureInText) become a marker. -> {text, removed}
@@ -118,11 +125,63 @@ export function guardFigures(text, allowed){
   text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), (...a) => figureInText(a.at(-1), allowed) ? a[0] : (removed++, "\u0001"));
   return {text, removed};
 }
+// Both guards, in one pass over the answer: a dose (dose.js) is removed when no source gives it with its conditions,
+// and kept when the answer states it in full, with every condition its source fact has ("2 drops per quart of clear
+// 4-6% bleach" for a USMC row whose quart is in the note under the table); any other figure, and a dose not stated
+// in full, must be in the sources (figureInText). The model cannot forge a marker (\u0001 is dropped first).
+// -> {text, removed, doses: [description of each dose removed]}
+export function guardAnswer(text, allowed){
+  text = String(text).replace(/\u0001/g, "");
+  const d = checkDoses(text, allowed), over = (s, [a, b]) => s.some(([x, y]) => a < y && b > x), inside = (s, [a, b]) => s.some(([x, y]) => a >= x && b <= y);
+  const cut = [...d.bad];
+  for (const m of text.matchAll(new RegExp(FIGURE_SRC, "gi"))){
+    const r = [m.index, m.index + m[0].length];
+    if (over(d.bad, r) || inside(d.full, r)) continue;
+    if (!figureInText(m.groups, allowed)) cut.push(r);
+  }
+  return {...markSpans(text, cut), doses: d.doses};
+}
 export const REMOVED_HTML = '<span class="removed" title="The AI wrote an amount that is not word for word in the sources">[amount removed]</span>';
 export function renderAnswer(text, allowed, cite, exactShown){
-  const g = guardFigures(text, allowed);
+  const g = guardAnswer(text, allowed);
   let html = renderMarkdown(g.text, cite).replace(/\u0001/g, REMOVED_HTML);
   if (g.removed) html += `<p class="caution">${g.removed === 1 ? "An amount in the AI's answer wasn't" : g.removed + " amounts in the AI's answer weren't"} ` +
     `found in the sources and ${g.removed === 1 ? "was" : "were"} removed - ${exactShown ? "use the exact wording above" : "check the cited pages"}.</p>`;
   return {html, removed: g.removed};
+}
+
+// ---- medicine doses: only word for word from the kit's documents, never from the AI (../medicine.js)
+// The excerpts of the box that hold a medicine dose (by content: any document, also one added to the index later) for
+// what the question asks about:
+//  * the question names a known medicine: the excerpt itself must name that medicine (brand names count as the same
+//    drug) and no other. So a paracetamol question never shows an ibuprofen line, also when "paracetamol" or "fever"
+//    is in the text just before it;
+//  * it names none ("What is the dose of Testamol?", "dose of medicine for a fever"): one of its own words must be in
+//    the excerpt or the 300 characters of its source just before it, and neither names a known medicine (so an
+//    ibuprofen dose line whose drug name is only in the heading above is never shown without that name).
+export function medicineExcerpts(q, exact){
+  const named = medicinesIn(q);
+  const words = doseSubjectWords(q).map(w => new RegExp(`\\b${w.replace(/[-]/g, "[- ]?")}`, "i"));
+  if (!named.size && !words.length) return [];
+  return exact.map(b => ({...b, excerpts: b.excerpts.filter(x => {
+    if (!medicineDoseIn(x)) return false;
+    const inX = medicinesIn(x);
+    if (named.size) return [...inX].some(m => named.has(m)) && [...inX].every(m => named.has(m));
+    if (inX.size) return false;
+    const at = b.hit.t.indexOf(x), ctx = at >= 0 ? b.hit.t.slice(Math.max(0, at - 300), at + x.length) : x;
+    if (medicinesIn(ctx).size) return false;            // a dose for a drug named just before it: the reader could not tell which
+    return words.some(w => w.test(ctx));
+  })})).filter(b => b.excerpts.length);
+}
+// The box without its medicine-dose excerpts: for every question that is not a medicine dose question, so the box
+// never shows a dose next to, say, a water question, and the AI (whose dose figures are removed) answers as usual.
+export const withoutMedicineDoses = exact => exact.map(b => ({...b, excerpts: b.excerpts.filter(x => !medicineDoseIn(x))})).filter(b => b.excerpts.length);
+// What Ask the Manuals shows for a medicine dose question (medicineDoseQuestion), without asking the AI. -> null (not a
+// medicine dose question: the usual path, with withoutMedicineDoses(exact) as the box), or {box, text}:
+//   box: the source passages holding the dose, shown word for word with their [n] links (renderExact); text: the caveat
+//   (sourceDoseNote), or with no such passage NOT_COVERED (the kit's documents do not give it + the safe pointer).
+export function medicineRoute(q, exact){
+  if (!medicineDoseQuestion(q)) return null;
+  const box = medicineExcerpts(q, exact);
+  return box.length ? {box, text: sourceDoseNote(box.map(b => b.n))} : {box: [], text: NOT_COVERED};
 }

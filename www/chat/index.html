@@ -10,8 +10,9 @@
 <div id="log" class="chatlog" aria-live="polite"></div>
 <form id="f" class="chatform"><textarea id="q" rows="2" placeholder="Ask anything, e.g. What should be in a 3-day emergency kit?" autofocus></textarea>
 <div><button id="send">Send</button> <button type="button" id="stop" hidden>Stop</button> <button type="button" id="clear">New chat</button></div></form>
-<p class="small">General offline assistant (the local AI model, no internet). It answers from what the model learned, not from the
-manuals, so it cites nothing: use <a href="../docs/">Ask the Manuals</a> for answers with page citations, or the
+<p class="small">General offline assistant (the local AI model, no internet). For first aid questions it is given the matching
+passages of the kit's manuals (above all the Australian notes), listed under its answer; other questions it answers from
+what the model learned. It never gives medicine doses: Ask the Manuals shows any dose the kit's documents give, word for word. Use <a href="../docs/">Ask the Manuals</a> for answers with page citations, or the
 <a id="lib">Library</a>. On a slow laptop an answer can take a minute or two. The conversation is kept only in this tab.</p>
 <p class="small">Advanced: <a id="raw">llamafile's own chat page</a> (more settings, no kit instructions, no notice).</p>
 </main>
