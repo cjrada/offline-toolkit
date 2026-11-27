@@ -47,7 +47,7 @@ const NUMW = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fif
 // mixed numbers first ("1 1/2", "1½"), then decimals and fractions, unicode fractions, number words
 const N1 = `(?:\\d+\\s+\\d+\\s*\\/\\s*\\d+|\\d+\\s*[½¼¾⅓⅔⅛]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
 // not inside a word, a decimal or a fraction ("4" in "1/4", "21" in "12/20/2013"); "/2 liters" after a unit is fine
-const NUM = `(?<![\\w.])(?<!\\d\\s*\\/\\s*)${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
+const NUM = `(?<![\\w.])(?<!\\d\\s?\\/\\s?)${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
 const UNIT = "(?:drops?|gtts?|gts|tsp|teaspoon(?:ful)?s?|tbsp|tablespoon(?:ful)?s?|ml|mls|millilit(?:re|er)s?|mg|milligrams?|" +
   "lit(?:re|er)s?|l|quarts?|qts?|gallons?|gal|pints?|cups?|fl\\.?\\s*oz|ounces?|oz|tablets?|tabs?|ppm|per\\s?cent|percent|%|" +
   "minutes?|mins?|hours?|hrs?|seconds?|secs?|°\\s*[cf]|degrees(?:\\s+(?:celsius|fahrenheit|c|f))?)(?![a-z])";

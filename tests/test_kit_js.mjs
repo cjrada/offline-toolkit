@@ -405,7 +405,9 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   assert.equal(E.guardFigures("add 2¼ cups of bleach", E.allowedText(ex, hits)).removed, 1, "invented 2¼ cups");
   assert.equal(E.guardFigures("2¼ cups", "Use 2 1/4 cups.").removed, 0);
   // no quadratic backtracking on padded PDF text
-  const t0 = Date.now(); E.figures("1" + " ".repeat(20000) + "x"); assert.ok(Date.now() - t0 < 500, "slow regex: " + (Date.now() - t0) + " ms");
+  // (CI once took 653 ms on 20,000 spaces with an unbounded lookbehind; linear now: ~2 ms for 40,000)
+  const t0 = Date.now(); E.figures("1" + " ".repeat(40000) + "x"); E.figures(" ".repeat(40000) + "1/" + " ".repeat(40000) + "4 tsp");
+  assert.ok(Date.now() - t0 < 200, "slow regex: " + (Date.now() - t0) + " ms");
   // with no excerpts shown, figures are checked against the sources sent
   const s = E.renderAnswer("Pour vinegar for at least 30 seconds, then 5 minutes more.", "Pour vinegar liberally for at least 30 seconds", null, false);
   assert.equal(s.removed, 1); assert.match(s.html, /at least 30 seconds/); assert.match(s.html, /<p class="caution">An amount in the AI's answer wasn't found in the sources and was removed - check the cited pages\.<\/p>$/);
