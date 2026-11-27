@@ -215,11 +215,18 @@ await test("prompt: no snake-bite example; only the question; quantities quoted 
   assert.doesNotMatch(p, /snake|tourniquet|constricting/i);
   assert.match(p, /Answer ONLY the question asked/);
   assert.match(p, /using ONLY the numbered sources/);
-  assert.match(p, /Never invent or convert numbers/);
-  assert.match(p, /quote it exactly as the source states it, with its units and its citation/);
-  assert.match(p, /bleach, iodine/); assert.match(p, /medication/);
+  // quantities: exact, with the conditions the source attaches (the real 4B model merged rows and sources:
+  // "5 drops per quart ... for cloudy or cold water 10 drops per quart or 2 drops per gallon")
+  assert.match(p, /give every dose, amount or time exactly as its source states it, together with the conditions/);
+  for (const c of ["product strength or percentage", "amount of water", "clear, cloudy or cold water", "waiting time", "treatment or storage"])
+    assert.ok(p.includes(c), c);
+  assert.match(p, /Never combine, average or convert figures from different sources, tables or table rows/);
+  assert.match(p, /list each one separately with its own citation/);
+  assert.match(p, /not sure which row of a table applies, quote the rows as written/);
   assert.match(p, /check it against the cited page/);
   assert.match(p, /the sources give no amount; do not guess/);
+  assert.match(p, /do not end with a line of citations only/);
+  assert.ok(p.length < 2000, "short enough for a 4B model: " + p.length);
   assert.match(p, /000/);
   const m = R.buildMessages(Q, R.search(ix, Q), c => c.f, c => `page ${c.p}`);
   assert.equal(m[0].content, p);
@@ -270,10 +277,26 @@ await test("notice on the chat page, pinned above the conversation", () => {
   assert.match(h, /<script type="module" src="chat\.js"><\/script>/);
   assert.doesNotMatch(h, /https?:\/\//, "no external URLs");
 });
+await test("prompts: general rules only, no topic examples a small model could repeat as advice", () => {
+  // The kit chat once answered a water question with "Never use open flames or torches to purify water...",
+  // straight from a "(e.g. no flames or torches...)" example in its prompt; the manuals prompt had the
+  // same problem with snake bite.
+  const topics = /torch|flame|fire|snake|tourniquet|bleach|iodine|water|purif|chemical|knife|spider|jellyfish|e\.g\.|for example|such as/i;
+  assert.doesNotMatch(chat.SYSTEM_PROMPT, topics);
+  assert.doesNotMatch(R.SYSTEM_PROMPT, /torch|flame|snake|tourniquet|e\.g\.|for example/i);
+});
+await test("answers: a trailing citation-only line is dropped, citations inside text stay", () => {
+  assert.equal(R.tidyAnswer("Add 5 drops [2].\n\n[2]"), "Add 5 drops [2].\n");
+  assert.equal(R.tidyAnswer("Add 5 drops [2].\n[1][2]\n"), "Add 5 drops [2].\n");
+  assert.equal(R.tidyAnswer("Add 5 drops [2]. [3]"), "Add 5 drops [2]. [3]");
+  assert.equal(R.tidyAnswer("[1] says boil it."), "[1] says boil it.");
+  assert.match(page("www/docs/rag.js"), /renderMarkdown\(tidyAnswer\(txt\)/);
+});
 await test("chat: kit system prompt and history trimming", () => {
   const p = chat.SYSTEM_PROMPT;
-  for (const s of [/offline emergency assistant/, /practical, safe/, /never suggest anything unusual, improvised or dangerous/,
-    /not sure, say so/, /call 000/, /Do not give medication doses/, /wild plant, berry or mushroom/]) assert.match(p, s);
+  for (const s of [/offline emergency assistant/, /practical, safe, conventional advice/, /never suggest anything unusual, improvised or dangerous/,
+    /Answer only what was asked/, /not sure, say so/, /call 000/, /Do not give medication doses/, /wild plant or fungus is safe to eat/,
+    /do not identify wild food/]) assert.match(p, s);
   const hist = [];
   for (let i = 0; i < 20; i++) hist.push({role: "user", content: "q".repeat(500)}, {role: "assistant", content: "a".repeat(500)});
   hist.push({role: "user", content: "last"});
@@ -326,19 +349,20 @@ await test("context budget: manuals prompt and chat history fit a 4096-token con
   // so this is deliberately pessimistic), + the answer's max_tokens, + 50 tokens of chat-template markup.
   const tokens = msgs => Math.ceil(msgs.reduce((n, m) => n + m.content.length, 0) / R.CHARS_PER_TOKEN) + 50;
   assert.equal(R.sourceBudget(8192), 9000); assert.equal(R.sourceBudget(32768), 9000);
+  assert.ok(R.sourceBudget(4096, "x".repeat(400)) === R.sourceBudget(4096) - 400, "a long question takes from the sources");
   assert.ok(R.sourceBudget(4096) <= 6000 && R.sourceBudget(4096) >= 4500, String(R.sourceBudget(4096)));
   assert.equal(R.sourceBudget(undefined), R.sourceBudget(4096));
   const many = [Q, "How do I treat a snake bite?", "bushfire smoke shelter food water burn", "How do I purify water?",
     fw.join(" "), "splint fracture bandage shelter fire signal"];
   for (const ctx of [4096, 8192]) for (const q of many) {
-    const hits = R.search(ix, q, {maxChars: R.sourceBudget(ctx)});
+    const hits = R.search(ix, q, {maxChars: R.sourceBudget(ctx, q)});
     const chars = hits.reduce((n, h) => n + h.t.length, 0);
-    assert.ok(chars <= R.sourceBudget(ctx), `${q} @${ctx}: ${chars} chars of sources`);
+    assert.ok(chars <= R.sourceBudget(ctx, q), `${q} @${ctx}: ${chars} chars of sources`);
     const used = tokens(R.buildMessages(q, hits, c => "FM 21-76 US Army Survival Manual (public domain)", c => "page 227")) + R.ANSWER_TOKENS;
     assert.ok(used <= ctx, `${q} @${ctx}: ~${used} tokens > ${ctx}`);
   }
   // the water question still gets its quantities at 4096
-  assert.match(R.search(ix, Q, {maxChars: R.sourceBudget(4096)}).map(h => h.t).join("\n"), QUANTITY);
+  assert.match(R.search(ix, Q, {maxChars: R.sourceBudget(4096, Q)}).map(h => h.t).join("\n"), QUANTITY);
   // chat: history budget by ctx
   const hist = Array.from({length: 40}, (_, i) => ({role: i % 2 ? "assistant" : "user", content: "x".repeat(700)}));
   for (const ctx of [4096, 8192]) {
@@ -346,7 +370,7 @@ await test("context budget: manuals prompt and chat history fit a 4096-token con
     assert.ok(tokens(m) + chat.ANSWER_TOKENS <= ctx, `chat @${ctx}`);
   }
   assert.ok(chat.historyBudget(8192) > chat.historyBudget(4096));
-  assert.match(page("www/docs/rag.js"), /search\(ix, q, \{maxChars: sourceBudget\(ctx\)\}\)/);
+  assert.match(page("www/docs/rag.js"), /search\(ix, q, \{maxChars: sourceBudget\(ctx, q\)\}\)/);
   assert.match(page("www/docs/rag.js"), /aiContext\("\.\.\/models\.json"\)/);
   assert.match(page("www/chat/chat.js"), /historyBudget\(await aiContext\("\.\.\/models\.json"\)\)/);
 });

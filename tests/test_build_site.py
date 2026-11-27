@@ -228,7 +228,7 @@ class Page(unittest.TestCase):
         self.assert_no_third_party(page)
 
     def test_expect_section(self):
-        """What to expect: below the downloads and above Support hosting, the shared AI notice, the five
+        """What to expect: below the downloads and above Support hosting, the shared AI notice, the six
         screenshots (lazy, sized, described), honest speed notes and the hardware figures from the README."""
         idx = {"tiers": {"small": [entry("small", "v3")]}}
         page = bs.render(idx, BASE, built_at="x")
@@ -247,7 +247,7 @@ class Page(unittest.TestCase):
             self.assertIn(s, notice)
         self.assertNotIn("<details", sec)
         imgs = re.findall(r"<img [^>]*>", sec)
-        self.assertEqual(len(imgs), 5)
+        self.assertEqual(len(imgs), 6)
         for (f, alt, cap), img in zip(bs.SCREENSHOTS, imgs):
             self.assertIn(f'src="screenshots/{f}"', img)
             self.assertIn('width="1440" height="900"', img)
@@ -256,8 +256,11 @@ class Page(unittest.TestCase):
             self.assertTrue(m and len(m.group(1)) > 30, img)
             self.assertIn(f"<figcaption>{bs.html.escape(cap)}</figcaption>", sec)
             self.assertTrue(os.path.exists(os.path.join(bs.SHOTS_DIR, f)), f)
-        for f in ("kit-home", "kit-ai-chat", "kit-library", "kit-wikivoyage-brisbane", "kit-map-brisbane"):
+        names = ["kit-home", "kit-ask-the-manuals", "kit-ai-chat", "kit-library", "kit-wikivoyage-brisbane", "kit-map-brisbane"]
+        self.assertEqual([f for f, _, _ in bs.SCREENSHOTS], [n + ".webp" for n in names])  # home first, then Ask the Manuals
+        for f in names:
             self.assertIn(f"screenshots/{f}.webp", sec)
+        self.assertIn("AI can make mistakes", dict((f, a) for f, a, _ in bs.SCREENSHOTS)["kit-ask-the-manuals.webp"])
         for s in ("7-14 tokens per second", "1-2.5 minutes", "Ask the Manuals answer about a\nminute", "8-core CPU",
                   "much faster", "Qwen3-4B-Instruct-2507", "Qwen3-8B (5.0 GB", "Qwen3-30B-A3B-Instruct-2507 (18.6 GB)",
                   "8 GB of RAM", "16 GB of RAM", "32 GB of RAM", '"mini" edition'):

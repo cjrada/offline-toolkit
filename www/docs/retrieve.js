@@ -70,12 +70,14 @@ function startsWithMatch(c, qt){ // a query word in the first 150 characters: th
   return [...qt.keys()].some(t => qt.get(t) === 1 && head.has(t));
 }
 
-// How many characters of sources fit the model's context (tokens): the prompt must leave room for the
-// system prompt, question and source headers (~900 tokens at this rate) and the answer (max_tokens 700). Manual text with tables
-// and numbers tokenizes worse than prose, so this counts 2 characters per token (English prose is ~4):
-// 4096 -> ~5,000 characters, 8192 and up -> 9,000 (six sources with their neighbour chunks).
-export const ANSWER_TOKENS = 700, OVERHEAD_TOKENS = 900, CHARS_PER_TOKEN = 2;
-export const sourceBudget = ctx => Math.max(2000, Math.min(9000, Math.floor(((ctx || 4096) - ANSWER_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN)));
+// How many characters of sources fit the model's context (tokens). The prompt must leave room for the answer
+// (max_tokens 700), the system prompt, the six source headers and the closing line (~1,000 tokens at this
+// rate) and the question itself. Manual text with tables and numbers tokenizes worse than prose, so this
+// counts 2 characters per token (English prose is ~4): 4096 -> ~4,750 characters for a short question,
+// 8192 and up -> 9,000 (six sources with their neighbour chunks).
+export const ANSWER_TOKENS = 700, OVERHEAD_TOKENS = 1000, CHARS_PER_TOKEN = 2;
+export const sourceBudget = (ctx, question = "") => Math.max(2000, Math.min(9000,
+  Math.floor(((ctx || 4096) - ANSWER_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN) - question.length));
 
 // The top k sources for q: [{f, p, u, blob, t, first, last}], each one or more consecutive chunks of one page,
 // at most maxPerPage sources per page and about maxChars of text in all.
@@ -114,11 +116,16 @@ export const SYSTEM_PROMPT = [
   "You are an offline survival and emergency reference assistant.",
   "Answer ONLY the question asked, using ONLY the numbered sources provided. Do not add facts, tips, warnings or topics that the question did not ask about, even if a source mentions them.",
   "Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly instead of answering from memory.",
-  "Never invent or convert numbers. When you give any dose or quantity (bleach, iodine, chlorine, tablets, medication, mixing ratios, times), quote it exactly as the source states it, with its units and its citation, and add a short caution to check it against the cited page. If no source states a quantity, say that the sources give no amount; do not guess one.",
-  "Be practical and concise.",
+  "Numbers: give every dose, amount or time exactly as its source states it, together with the conditions the source attaches to it (product strength or percentage, amount of water, clear, cloudy or cold water, waiting time, and purpose such as treatment or storage), with its citation.",
+  "Never combine, average or convert figures from different sources, tables or table rows. If sources give different figures, list each one separately with its own citation. If you are not sure which row of a table applies, quote the rows as written.",
+  "After any dose or amount, add a short caution to check it against the cited page. If no source states an amount, say that the sources give no amount; do not guess one.",
+  "Be practical and concise. Put citations inside sentences; do not end with a line of citations only.",
   "The user is in Australia. If an Australian note and an older US manual disagree on the question asked, follow the Australian note and mention the difference. The Australian emergency number is 000.",
   "Never state that a wild plant or mushroom is safe to eat.",
 ].join(" ");
+
+// A final line or paragraph made only of citations ("[2]", "[1][2]") adds nothing: drop it.
+export const tidyAnswer = txt => txt.replace(/\s*\n[ \t]*(\[\d{1,3}\][ \t,]*)+\s*$/, "\n");
 
 export function buildMessages(q, hits, title, where){
   const ctx = hits.map((c, i) => `[${i + 1}] ${title(c)}, ${where(c)}:\n${c.t}`).join("\n\n");

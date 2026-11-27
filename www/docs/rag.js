@@ -1,6 +1,6 @@
 // Offline RAG: BM25 keyword retrieval in the browser (retrieve.js) + local LLM (llamafile, OpenAI-compatible API).
 // Answers are rendered with md.js: escaped first, then a small markdown subset; [n] links to source n.
-import {createIndex, search, buildMessages, sourceBudget, ANSWER_TOKENS} from "./retrieve.js";
+import {createIndex, search, buildMessages, sourceBudget, ANSWER_TOKENS, tidyAnswer} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
 import {aiContext} from "../ai-status.js";
 const LLM = `${location.protocol}//${location.hostname}:8080/v1/chat/completions`;
@@ -49,7 +49,7 @@ $("f").onsubmit = async e => {
   e.preventDefault(); const q = $("q").value.trim(); if(!q) return;
   // Sources sized to the context the AI runs with now (models.json; 4096 if unknown), so the prompt fits.
   const ctx = await aiContext("../models.json");
-  const hits = search(ix, q, {maxChars: sourceBudget(ctx)});
+  const hits = search(ix, q, {maxChars: sourceBudget(ctx, q)});
   $("srcH").hidden = false;
   $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
@@ -64,7 +64,7 @@ $("f").onsubmit = async e => {
       let i; while((i = buf.indexOf("\n")) >= 0){ const line = buf.slice(0,i).trim(); buf = buf.slice(i+1);
         if(!line.startsWith("data:")) continue; const d = line.slice(5).trim(); if(d==="[DONE]") continue;
         try { txt += JSON.parse(d).choices[0].delta.content || ""; } catch {}
-        out.innerHTML = renderMarkdown(txt, n => hits[n-1] ? srcLink(hits[n-1]) : null); } }
+        out.innerHTML = renderMarkdown(tidyAnswer(txt), n => hits[n-1] ? srcLink(hits[n-1]) : null); } }
     if (!txt) out.textContent = "The AI returned no answer. Try again, or tick \"search only\" and read the sources.";
   } catch(err){ out.textContent = "Could not reach the local AI on port 8080 — is it still starting? (" + err + ")"; }
 };

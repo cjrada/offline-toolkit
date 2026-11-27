@@ -31,6 +31,11 @@ SCREENSHOTS = (
     ("kit-home.webp", "The kit's home page in a browser: tiles for Chat, Ask the Manuals, Library, Maps and PDF shelf, "
      "a safety note, and the AI model panel showing the 4B model running on the CPU only.",
      "Home page: chat, manuals, library, maps and the PDF shelf; the model panel shows CPU-only mode."),
+    ("kit-ask-the-manuals.webp", "Ask the Manuals answering \"How much bleach do I add to purify water?\" below the yellow "
+     "\"AI can make mistakes\" notice: 5 drops per litre of 5.25-8.25% bleach, 1/4 teaspoon per gallon, 1 teaspoon per "
+     "5 gallons, 2 teaspoons per 10 gallons, stand at least 60 minutes, each with a numbered citation, and the Sources "
+     "list starting below.",
+     "Ask the Manuals: a cited answer from the water-treatment PDF, with the AI notice above it."),
     ("kit-ai-chat.webp", "Offline AI chat answering \"How do I purify water in an emergency?\" with headed sections "
      "on boiling and chemical treatment.",
      "AI chat (llamafile's chat page) answering \"How do I purify water in an emergency?\"."),
@@ -306,9 +311,9 @@ def render_expect(notice):
 <p class="warn ai-notice" role="note">{notice}</p>
 <p>Unzip a kit onto a USB drive, run <code>start.bat</code> (Windows) or <code>sh start.sh</code> (Linux) and open
 <code>http://localhost:8000/</code>. Everything below runs from the drive with no internet. These are real, unedited
-screenshots of the small kit (version 20261127) on a Linux laptop, taken before the kit's own chat page and
-this notice were added: the Chat tile now opens a kit page with the notice pinned on screen, and llamafile's
-chat page (shown here) is still one click away.</p>
+screenshots of the small kit on a Linux laptop. The Ask the Manuals one is from the current kit pages; the others
+were taken before the kit's own chat page and this notice were added: the Chat tile now opens a kit page with the
+notice pinned on screen, and llamafile's chat page (shown here) is still one click away.</p>
 <div class="gallery">
 {figs}
 </div>
