@@ -70,8 +70,10 @@ const WATER = /\b(?:water|purif\w*|disinfect\w*|chlorin\w*|iodine|bleach|hypochl
 const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µsv|usv|rems?|grays?|gy|x-?rays?|fallout|nuclear)\b/i;
 // "Iodine tablets" with a radiation word means potassium iodide (a medicine), unless the question is about water:
 // "How many iodine tablets per litre of water after nuclear fallout?" is water treatment.
-const WATER_CONTEXT = /\b(?:water|lit(?:re|er)s?|quarts?|gallons?|canteens?|purif\w*|disinfect\w*)\b/i;
-const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s) && !WATER_CONTEXT.test(s);
+// Treating water: an amount for a volume of water, or purifying / disinfecting / treating it. "If I drank the water",
+// "bottled water" or "contaminated water" alone is not.
+const TREATS_WATER = /\b(?:per|in|for|to|into|each)\s+(?:an?\s+|one\s+|each\s+|every\s+|\d+(?:[.,]\d+)?\s*)?(?:lit(?:re|er)s?|l|quarts?|gallons?|canteens?|bottles?|buckets?)\b|\b(?:purif\w*|disinfect\w*|treat(?:s|ing|ed)?|steril[iy][sz]\w*|clean(?:ing)?)\s+(?:\w+\s+){0,2}?water\b|\bwater\s+(?:purif\w*|treatment|disinfect\w*|steril\w*)/i;
+const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s) && !TREATS_WATER.test(s);
 const waterOnly = s => WATER.test(s) && !MED.test(s) && !radiationIodine(s);
 
 // Numbers in digits or words ("7.5", "4 to 6", "four", "four to six").
@@ -82,11 +84,12 @@ const N = `${N1}(?:\\s*(?:-|–|to|or)\\s*${N1})?`;
 const ALWAYS = new RegExp(`(?<![\\w.])${N}\\s*(?:mg|milligrams?|mcg|micrograms?|µg|ug|iu|international units?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?(?!\\s*(?:\\/|per)\\s*(?:l\\b|lit))`, "gi");
 const hasAlways = s => new RegExp(ALWAYS.source, "i").test(s);
 // A dose once the text is about a medicine ("5 ml of children's ibuprofen", "two tablets every four hours", "twice a day").
-const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|teaspoons?|tsp|tablespoons?|tbsp|puffs?|doses?|sachets?)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)\\b)(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
+// One word may stand between the number and the unit ("2 iodine tablets", "2 paracetamol tablets", "5 ml").
+const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:[a-z][a-z'-]*\\s+)?(?:(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|puffs?|doses?|sachets?)\\b|(?:teaspoons?|tsp|tablespoons?|tbsp)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)(?![\\w-])(?!\\s+syrups?)))(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
   `|\\bevery\\s+${N}\\s*(?:hours?|hrs?|h)\\b|\\b${N1}[- ]hourly\\b` +
   `|\\b(?:once|twice|thrice|${N}\\s*(?:times|x))\\s*(?:(?:a|per|each)\\s+day|daily)\\b|\\bfor\\s+${N}\\s*days\\b` +
   // a fraction of a unit: "half a tablet", "a quarter of a tablet", "one and a half tablets"
-  `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:tablets?|tabs?|capsules?|caplets?|pills?|teaspoons?|tsp|tablespoons?|doses?|sachets?)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)\\b)` +
+  `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:(?:tablets?|tabs?|capsules?|caplets?|pills?|doses?|sachets?)\\b|(?:teaspoons?|tsp|tablespoons?|tbsp)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)(?![\\w-])(?!\\s+syrups?)))` +
   // a daily maximum with no unit: "max 6 in a day", "no more than 8 in 24 hours", "up to 4 a day"
   `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b`, "gi");
 // The earlier user turns of a conversation, as text (history: [{role, content}] or [string]).
@@ -104,6 +107,7 @@ const DOSE_WORD = /\b(?:doses?|dosage|dosing|milligrams?|micrograms?|mg|mcg|mg\/
 export function medicineDoseQuestion(q, prior = []){
   q = String(q); const before = userTurns(prior);
   if ((MED.test(q) || radiationIodine(q)) && ASKS_AMOUNT.test(q)) return true;   // also "potassium iodide / KI / iodine tablets for radiation"
+  if (radiationIodine(q) && /\b(?:take|give|have)\b/i.test(q)) return true;          // "Should I take iodine tablets after the nuclear accident?"
   if (waterOnly(q)) return false;                       // "How many 16 mg iodine tablets per quart?", also after a medicine turn
   return hasAlways(q) || (DOSE_WORD.test(q) && !RADIATION.test(q)) || (MED.test(before) && ASKS_AMOUNT.test(q));
 }

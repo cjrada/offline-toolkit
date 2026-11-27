@@ -819,9 +819,22 @@ await test("medicine: Ask the Manuals shows a source dose word for word with its
   assert.deepEqual(MD.guardMedicine("How many iodine tablets per litre of water after nuclear fallout?", "Use 1 iodine tablet per litre of clear water; 2 if cloudy."),
     {text: "Use 1 iodine tablet per litre of clear water; 2 if cloudy.", refused: false, removed: 0, pointer: false});
   assert.ok(MD.medicineDoseQuestion("What dose of iodine tablets for radiation?"), "KI, no water");
+  // ...but water that is not being treated does not make it water treatment (review of cf6b247)
+  for (const q of ["Should I take iodine tablets after the nuclear accident if I drank the water?",
+      "How many iodine tablets should my child take after fallout? We only have bottled water.",
+      "How much iodine should an adult take for radiation exposure from contaminated water?"])
+    assert.ok(MD.medicineDoseQuestion(q), q);
+  const ki = MD.guardMedicine("Does iodine help after the nuclear accident if I drank the water?", "Adults take 2 iodine tablets once a day. Children take half a tablet.");
+  assert.doesNotMatch(ki.text, /2 iodine tablets|once a day|half a tablet/, ki.text); assert.ok(ki.removed > 0 && ki.text.endsWith(MD.POINTER));
   // an oral rehydration recipe in a medicine answer is not a dose (optional item of the same review)
   const ors = MD.guardMedicine("Can I give paracetamol with fluids?", "Mix half a teaspoon of salt and 6 teaspoons of sugar in 1 litre of water. Give 2 tablets of paracetamol.").text;
   assert.match(ors, /half a teaspoon of salt and 6 teaspoons of sugar/); assert.doesNotMatch(ors, /2 tablets/);
+  // the recipe exception is for spoons of salt or sugar only: never "sugar-free" medicine, sugar syrup or tablets (review of cf6b247)
+  for (const a of ["Give 2 tablets of sugar-free paracetamol every 4 hours.", "Give 2 tablespoons of sugar syrup.", "Give 2 tablets of sugar.",
+      "Give paracetamol: half a teaspoon of sugar-free syrup.", "Give 1 teaspoon of sugar syrup of paracetamol."]){
+    const g = MD.guardMedicine("Can I give paracetamol?", a);
+    assert.doesNotMatch(g.text, /\b(2|1) (tablets|tablespoons|teaspoon)\b|half a teaspoon/, a + " -> " + g.text); assert.ok(g.removed > 0, a);
+  }
   assert.deepEqual([...MD.medicinesIn("Potassium iodide (KI, ThyroSafe) 130 mg")], ["potassium iodide"], "one drug, brand names included");
   const js2 = page("www/docs/rag.js");
   assert.match(js2, /exact = withoutMedicineDoses\(exact\);/);
