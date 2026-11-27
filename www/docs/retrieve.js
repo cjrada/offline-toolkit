@@ -44,8 +44,10 @@ export const wantsSafeWater = q => safeWaterTerms([...new Set(tok(q))]);
 
 // ---- figures: a number with a unit (exact.js shows them verbatim; amount questions favour passages that have them)
 const NUMW = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter";
-const N1 = `(?:\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
-const NUM = `(?<![\\w.\\/])${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
+// mixed numbers first ("1 1/2", "1½"), then decimals and fractions, unicode fractions, number words
+const N1 = `(?:\\d+\\s+\\d+\\s*\\/\\s*\\d+|\\d+\\s*[½¼¾⅓⅔⅛]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
+// not inside a word, a decimal or a fraction ("4" in "1/4", "21" in "12/20/2013"); "/2 liters" after a unit is fine
+const NUM = `(?<![\\w.])(?<!\\d\\s*\\/\\s*)${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
 const UNIT = "(?:drops?|gtts?|gts|tsp|teaspoon(?:ful)?s?|tbsp|tablespoon(?:ful)?s?|ml|mls|millilit(?:re|er)s?|mg|milligrams?|" +
   "lit(?:re|er)s?|l|quarts?|qts?|gallons?|gal|pints?|cups?|fl\\.?\\s*oz|ounces?|oz|tablets?|tabs?|ppm|per\\s?cent|percent|%|" +
   "minutes?|mins?|hours?|hrs?|seconds?|secs?|°\\s*[cf]|degrees(?:\\s+(?:celsius|fahrenheit|c|f))?)(?![a-z])";
@@ -63,6 +65,8 @@ const WORDS = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eig
   a: 1, an: 1, each: 1, every: 1, "½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": 0.125};
 function num(x){
   x = x.trim().toLowerCase(); if (x in WORDS) return WORDS[x];
+  let w = x.match(/^(\d+)\s+(\d+)\s*\/\s*(\d+)$/); if (w) return +w[1] + +w[2] / +w[3];           // 1 1/2
+  w = x.match(/^(\d+)\s*([½¼¾⅓⅔⅛])$/); if (w) return +w[1] + WORDS[w[2]];                          // 1½
   let m = x.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+)$/); if (m) return +m[1] / +m[2];
   if (/^\d{1,3},\d{3}$/.test(x)) return +x.replace(",", "");
   return +x.replace(",", ".");
@@ -84,29 +88,31 @@ export function parseFigure(g){
 }
 const atom = (n, u) => `${k(n)} ${u}`;
 function figuresIn(text){
-  const atoms = new Set(), ranges = new Set(), compounds = new Set(), lines = [];
-  for (const line of String(text).split(/\n|(?<=[.;!?])\s+/)){
-    const here = new Set();
+  const atoms = new Set(), ranges = new Set(), compounds = new Set(), rows = [];
+  for (const line of String(text).split("\n")){
+    const byUnit = new Map(), add = (n, u) => { const a = atom(n, u); atoms.add(a); (byUnit.get(u) || byUnit.set(u, new Set()).get(u)).add(a); };
     for (const m of line.matchAll(new RegExp(FIGURE_SRC, "gi"))){
       const f = parseFigure(m.groups), head = f.nums.map(n => atom(n, f.u));
-      head.forEach(a => { atoms.add(a); here.add(a); });
+      f.nums.forEach(n => add(n, f.u));
       if (f.nums.length === 2) ranges.add(head.join("-"));
-      if (f.tail){ const t = atom(...f.tail); atoms.add(t); here.add(t); compounds.add(head.join("-") + " / " + t); }
+      if (f.tail){ add(...f.tail); compounds.add(head.join("-") + " / " + atom(...f.tail)); }
     }
-    if (here.size) lines.push(here);
+    if (byUnit.size) rows.push(byUnit);
   }
-  return {atoms, ranges, compounds, lines};
+  return {atoms, ranges, compounds, rows};
 }
 let memo = ["", null];
 // Is this figure (a regexp match's groups) in the text, as the same number(s) and unit, however written? A "per" figure
-// ("5 drops per quart") also counts when its two parts are on one line of the text (a table row: "1 quart/1 liter 5 drops").
+// ("5 drops per quart") also counts as a table row: a line of the text (a real line break, not a sentence) whose only
+// figure in each of the two units is that one ("1 quart/1 liter 5 drops"). A table flattened to one line (a PDF added
+// in the browser) has many drops figures on its line, so it never pairs figures from different rows.
 export function figureInText(g, text){
   if (memo[0] !== text) memo = [text, figuresIn(text)];
   const F = memo[1], f = parseFigure(g), head = f.nums.map(n => atom(n, f.u));
   const headOk = head.every(a => F.atoms.has(a)) || (head.length === 2 && F.ranges.has(head.join("-")));
   if (!f.tail) return headOk;
-  const t = atom(...f.tail);
-  return F.compounds.has(head.join("-") + " / " + t) || F.lines.some(l => l.has(t) && head.every(a => l.has(a)));
+  const t = atom(...f.tail), only = (row, u, want) => { const got = row.get(u); return !!got && got.size === want.length && want.every(a => got.has(a)); };
+  return F.compounds.has(head.join("-") + " / " + t) || (f.u !== f.tail[1] && F.rows.some(r => only(r, f.u, head) && only(r, f.tail[1], [t])));
 }
 // How many dose figures (not times or temperatures) a passage holds, for ranking amount questions.
 export const doseFigures = t => [...String(t).matchAll(new RegExp(FIGURE_SRC, "gi"))].filter(m => !TIME_UNITS.has(unit(m.groups.u))).length;

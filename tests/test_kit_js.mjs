@@ -369,6 +369,22 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   for (const bad of ["20 drops per gallon", "add 10 drops of bleach per gallon", "10 drops per quart", "3 drops per gallon", "1/2 teaspoon per gallon",
     "5.5%", "5.25% to 9%", "6 drops", "90 minutes", "4 teaspoon", "1 hour"])
     assert.equal(E.guardFigures(bad, A).removed, 1, bad);
+  // a "per" figure pairs two parts only within one real table row: not on a table flattened to one line
+  const flatWA = WATER.filter(w => w.f.startsWith("WA-DoH")).map(w => w.t).join(" ").replace(/\s+/g, " ");
+  for (const bad of ["10 drops per quart", "5 drops per gallon", "10 drops per gallon", "1/4 teaspoon per quart"])
+    assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened table: " + bad);
+  for (const ok of ["5 drops", "1/4 teaspoon", "2 drops per gallon"]) assert.equal(E.guardFigures(ok, flatWA).removed, 0, "flattened: " + ok);
+  for (const ok of ["5 drops per quart", "10 drops per 2 liters", "10 drops per 1/2 gallon", "1 teaspoon per 5 gallons"])
+    assert.equal(E.guardFigures(ok, A).removed, 0, "table row: " + ok);
+  for (const bad of ["5 drops per gallon", "10 drops per 1 liter"]) assert.equal(E.guardFigures(bad, A).removed, 1, "rows not mixed: " + bad);
+  // mixed numbers are whole figures, both ways
+  assert.deepEqual(E.figures("add 1 1/2 teaspoons, or 1½ teaspoons, or 2 ½ cups"), ["1 1/2 teaspoons", "1½ teaspoons", "2 ½ cups"]);
+  const mixed = "Bleach: 1 1/2 teaspoons per 5 gallons.";
+  for (const ok of ["1 1/2 teaspoons per 5 gallons", "1½ tsp per 5 gallons", "1 1/2 teaspoons"]) assert.equal(E.guardFigures(ok, mixed).removed, 0, ok);
+  for (const bad of ["1/2 teaspoon", "1/2 teaspoon per 5 gallons", "1 teaspoon"]) assert.equal(E.guardFigures(bad, mixed).removed, 1, bad);
+  for (const bad of ["1 1/2 teaspoons", "1½ teaspoons"]) assert.equal(E.guardFigures(bad, "Use 1/2 teaspoon.").removed, 1, bad);
+  assert.equal(E.guardFigures("1/2 teaspoon", "Use 1/2 teaspoon.").removed, 0);
+  assert.deepEqual(E.figures("12/20/2013, 1/4 teaspoon"), ["1/4 teaspoon"]);
   // no quadratic backtracking on padded PDF text
   const t0 = Date.now(); E.figures("1" + " ".repeat(20000) + "x"); assert.ok(Date.now() - t0 < 500, "slow regex: " + (Date.now() - t0) + " ms");
   // with no excerpts shown, figures are checked against the sources sent
