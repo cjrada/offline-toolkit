@@ -157,7 +157,8 @@ export function renderAnswer(text, allowed, cite, exactShown){
 //    drug) and no other. So a paracetamol question never shows an ibuprofen line, also when "paracetamol" or "fever"
 //    is in the text just before it;
 //  * it names none ("What is the dose of Testamol?", "dose of medicine for a fever"): one of its own words must be in
-//    the excerpt or the 300 characters of its source just before it, and the excerpt names no known medicine.
+//    the excerpt or the 300 characters of its source just before it, and neither names a known medicine (so an
+//    ibuprofen dose line whose drug name is only in the heading above is never shown without that name).
 export function medicineExcerpts(q, exact){
   const named = medicinesIn(q);
   const words = doseSubjectWords(q).map(w => new RegExp(`\\b${w.replace(/[-]/g, "[- ]?")}`, "i"));
@@ -168,6 +169,7 @@ export function medicineExcerpts(q, exact){
     if (named.size) return [...inX].some(m => named.has(m)) && [...inX].every(m => named.has(m));
     if (inX.size) return false;
     const at = b.hit.t.indexOf(x), ctx = at >= 0 ? b.hit.t.slice(Math.max(0, at - 300), at + x.length) : x;
+    if (medicinesIn(ctx).size) return false;            // a dose for a drug named just before it: the reader could not tell which
     return words.some(w => w.test(ctx));
   })})).filter(b => b.excerpts.length);
 }

@@ -784,6 +784,23 @@ await test("medicine: Ask the Manuals shows a source dose word for word with its
   assert.deepEqual(E.withoutMedicineDoses(fever), [], "the dose line is dropped from that question's box");
   assert.equal(E.withoutMedicineDoses(blk("Boil water for 1 minute.")).length, 1);
   assert.equal(E.medicineRoute("How much Testamol can an adult take?", blk(MED_DOC.t)), null, "no dose word, no listed drug: the usual path");
+  // no medicine named in the question: a dose line whose drug is named only just before it is not shown (review of 6ead9ab)
+  const FEVER = {f: "Child-Fever-Fixture.pdf", p: 2, t: "FEVER IN CHILDREN\nIbuprofen is the first choice in this guide for fever and for pain from sprains.\n" +
+    "Avoid it in asthma or if the child is dehydrated.\nRest and fluids help most children.\nCheck the child's weight before every dose.\nGive 10 mg/kg every 6 to 8 hours.\n" +
+    "No more than 4 doses in 24 hours."};
+  const fx = R.createIndex([FEVER].map(c => ({...c})));
+  for (const q of ["What dose of medicine for a child with fever?", "What is the dose for a child with fever?"]){
+    const ex = E.extractExact(fx, q, R.search(fx, q));
+    assert.ok(ex.some(b => b.excerpts.some(x => /10 mg\/kg/.test(x) && !/ibuprofen/i.test(x))), q + ": the excerpt alone does not name the drug");
+    assert.deepEqual(E.medicineRoute(q, ex), {box: [], text: MD.NOT_COVERED}, q);
+  }
+  assert.deepEqual(E.medicineRoute("painkiller dose for a sprain?", blk("For sprains, ibuprofen is often used.\nAdults: 400 mg every 6 hours.", "Adults: 400 mg every 6 hours.")),
+    {box: [], text: MD.NOT_COVERED});
+  assert.deepEqual(E.medicineRoute("antibiotic dose for tick bite fever?", blk("Tick bite fever is treated with doxycycline.\nAdults: 100 mg twice a day for 7 days.", "Adults: 100 mg twice a day for 7 days.")),
+    {box: [], text: MD.NOT_COVERED});
+  assert.equal(E.medicineRoute("What is the dose of Testamol for an adult?", blk(MED_DOC.t, " Adults: 500 mg every 4 to 6 hours.")).box.length, 1, "an unlisted drug's own line still shows");
+  // a radiation dose is not a medicine dose (optional item of the same review)
+  for (const q of ["What radiation dose is dangerous?", "What dose of radiation in mSv is safe after fallout?"]) assert.ok(!MD.medicineDoseQuestion(q), q);
   const js2 = page("www/docs/rag.js");
   assert.match(js2, /exact = withoutMedicineDoses\(exact\);/);
   assert.ok(js2.indexOf("exact = withoutMedicineDoses(exact);") < js2.indexOf('$("exact").innerHTML = renderExact(exact'), "dose lines dropped before the usual box is rendered");

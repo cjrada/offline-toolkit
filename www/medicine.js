@@ -91,11 +91,13 @@ const userTurns = (history = []) => history.map(m => typeof m === "string" ? m :
 // An explicit dose word: also a medicine the list does not name ("What is the dose of Testamol?"), so documents added
 // to the index later are found the same way. "How much water should I drink with a fever?" is not one.
 const DOSE_WORD = /\b(?:doses?|dosage|dosing|milligrams?|micrograms?|mg|mcg|mg\/kg)\b/i;
+// A radiation dose is not a medicine dose ("What radiation dose is dangerous?"); the AI answers it as usual.
+const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µsv|usv|rems?|grays?|gy|x-?rays?|fallout|nuclear)\b/i;
 export function medicineDoseQuestion(q, prior = []){
   q = String(q); const before = userTurns(prior);
   if (MED.test(q) && ASKS_AMOUNT.test(q)) return true;
   if (waterOnly(q)) return false;                       // "How many 16 mg iodine tablets per quart?", also after a medicine turn
-  return hasAlways(q) || DOSE_WORD.test(q) || (MED.test(before) && ASKS_AMOUNT.test(q));
+  return hasAlways(q) || (DOSE_WORD.test(q) && !RADIATION.test(q)) || (MED.test(before) && ASKS_AMOUNT.test(q));
 }
 // Sentences as [start, end): a break is . ! ? followed by a space or the end ("7.5 ml" is one sentence), or a line break.
 const sentenceSpans = t => { const out = [], re = /[.!?](?=\s|$)|\n/g; let s = 0, m;
