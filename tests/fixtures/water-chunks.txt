@@ -77,3 +77,45 @@ additives. Be sure to read
  DOH Pub 821-031
  Revised - July 2013
 http://www.doh.wa.gov/Emergencies/EmergencyPreparednessandResponse/Factsheets/W... 12/20/2013
+=== USMC-Wilderness-Medicine-Course.pdf page 208
+a shelf life of one year, not to exceed the initial expiration date of four
+ years.
+ 49703
+ Month / Year / Batch Number
+ (3) Water Disinfecting Techniques and Halogen Doses.
+Iodination techniques Amount for Amount for
+Added to 1 liter or quart of water 4 PPM 8 PPM
+Iodine tablets
+Tetraglcine hydroperiodide EDWGT ½ tablet 1 tablet
+Potable Aqua
+Globaline
+2% iodine solution (tincture) 0.2 ml 0.4 ml
+ 5 gtts 10 gtts
+10% povidone-iodine solution* 0.35 ml 0.70 ml
+ 8 gtts 16 gtts
+Chlorination techniques Amount for Amount for
+ 5 PPM 10 PPM
+Household bleach 5% 0.1 Ml 0.2 ml
+ Sodium hypochlorie 2 gtts 4 gtts
+AquaClear 1 tablet
+ Sodium dichloroisocyanurate
+AquaCure, AquaPure, Chlor-floc 8 PPM
+ Chlorine plus flocculating agent 1 tablet
+ *Providone-iodine solutions release free iodine in levels adequate for disinfecting, but
+ scant data is available.
+ Measure with dropper (1 drop=0.05 ml) or
+=== USMC-Wilderness-Medicine-Course.pdf page 208
+done-iodine solutions release free iodine in levels adequate for disinfecting, but
+ scant data is available.
+ Measure with dropper (1 drop=0.05 ml) or tuberculin syringe
+ PPM-part per million gtts-drops ml-milliliter
+Concentration of Contact time in minutes at various water temperatures
+Halogen
+ 5 C / 40 F 15 C / 60 F 30 C / 85 F
+2 PPM 240 180 60
+4 PPM 180 50 45
+8 PPM 60 30 15
+NOTE: These contact times have been extended from the usual recommendations to account for
+recent data that prolonged contact time is needed in very cold water to kill Giardia cysts.
+ A6-
+ 5

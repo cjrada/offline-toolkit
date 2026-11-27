@@ -17,30 +17,16 @@
 //      never edited.
 //   3. The model is told the amounts are shown to the reader and that it must not write any figure itself
 //      (retrieve.js buildMessages with the excerpts).
-//   4. renderAnswer(): every figure in the model's answer that is not word for word in the excerpts shown (or, with
-//      no excerpts, in the sources sent) is removed and marked, with a caution under the answer.
+//   4. renderAnswer(): every figure in the model's answer that is not in the sources sent (same number(s) and unit,
+//      however written: "one full minute" = "1 minute", "5.25% to 8.25%" = "5.25-8.25 percent"; a "per" figure must be
+//      in the sources as such or as one table row) is removed and marked, with a caution under the answer.
+//   Retrieval (retrieve.js scoreAll) also ranks passages with dose figures higher for amount questions.
 
-import {queryTerms, wantsSafeWater, tok} from "./retrieve.js";
+import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
 
-const NUMW = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter";
-const N1 = `(?:\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
-const NUM = `(?<![\\w.\\/])${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
-const UNIT = "(?:drops?|gtts?|gts|tsp|teaspoon(?:ful)?s?|tbsp|tablespoon(?:ful)?s?|ml|mls|millilit(?:re|er)s?|mg|milligrams?|" +
-  "lit(?:re|er)s?|l|quarts?|qts?|gallons?|gal|pints?|cups?|fl\\.?\\s*oz|ounces?|oz|tablets?|tabs?|ppm|per\\s?cent|percent|%|" +
-  "minutes?|mins?|hours?|hrs?|seconds?|secs?|°\\s*[cf]|degrees(?:\\s+(?:celsius|fahrenheit|c|f))?)(?![a-z])";
-const ADJ = "(?:(?:full|whole|level|heaped|heaping)\\s+)?";
-const TAIL = `(?:\\s*(?:\\/|\\bper\\b|\\bfor\\s+(?:each|every)\\b|\\bto\\b|\\bin\\b|\\bof\\s+[a-z]+(?:\\s+[a-z]+)?\\s+(?:per|to|in|for\\s+(?:each|every))\\b)` +
-  `\\s*(?:(?:a|an|each|every|${N1})\\s*-?\\s*)?${ADJ}${UNIT})?`;
-// A figure: a number with a unit, with an optional "per gallon" / "/30 MIN" / "of bleach per litre" part.
-export const FIGURE_SRC = `${NUM}\\s*(?:-\\s*)?${ADJ}(?:a\\s+)?${UNIT}${TAIL}`;
+export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
-export const figures = s => [...String(s).matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => m[0]);
-
-const AMOUNT_Q = new RegExp("\\bhow\\s+(?:much|many|long|often|strong)\\b|\\b(?:dose|doses|dosage|dosing|amounts?|quantit(?:y|ies)|ratio|proportions?|" +
-  "dilut\\w*|strength|concentration|drops?|teaspoons?|tablespoons?|tsp|tbsp|ml|millilit\\w*|litres?|liters?|quarts?|gallons?|tablets?|" +
-  "ppm|percent|per\\s?cent|minutes?|hours?|temperature|degrees)\\b|%|°", "i");
-export const quantityQuestion = q => AMOUNT_Q.test(q) || wantsSafeWater(q);
 
 // Question words that say what KIND of answer is wanted, not its topic: they do not make a passage relevant.
 const GENERIC = new Set(["much", "many", "long", "often", "strong", "add", "use", "make", "need", "put", "get", "take", "give",
@@ -122,29 +108,21 @@ export function renderExact(blocks, title, where, link){
       b.excerpts.map(x => `<pre>${esc(x)}</pre>`).join('<p class="gap">…</p>') + `</figure>`).join("");
 }
 
-// The text the answer's figures are checked against: the excerpts shown, or (no excerpts) the sources sent.
-export const allowedText = (blocks, hits) => (blocks.length ? blocks.flatMap(b => b.excerpts) : hits.map(h => h.t)).join("\n");
-const norm = s => s.toLowerCase().replace(/\s+/g, " ");
+// The text the answer's figures are checked against: all the sources sent (the excerpts shown are slices of them).
+export const allowedText = (blocks, hits) => [...hits.map(h => h.t), ...blocks.flatMap(b => b.excerpts)].join("\n");
 
-// Figures in the answer that are not word for word in `allowed` become a marker. -> {text, removed}
-// A whole-figure match only: "4 teaspoon" is not in "1/4 teaspoon", nor "5 drops" in "15 drops", nor "6 hours" in "16 hours".
-export function inWords(allowed, fig){
-  const a = norm(allowed), f = norm(fig).trim();
-  for (let i = a.indexOf(f); f && i >= 0; i = a.indexOf(f, i + 1))
-    if (!/[\w.\/]/.test(a[i - 1] || "") && !/[a-z0-9]/.test(a[i + f.length] || "")) return true;
-  return false;
-}
+// Figures in the answer that are not in `allowed` (same numbers and unit, however written: see retrieve.js
+// figureInText) become a marker. -> {text, removed}
 export function guardFigures(text, allowed){
   let removed = 0;
-  text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), m => inWords(allowed, m) ? m : (removed++, "\u0001"));
+  text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), (...a) => figureInText(a.at(-1), allowed) ? a[0] : (removed++, "\u0001"));
   return {text, removed};
 }
 export const REMOVED_HTML = '<span class="removed" title="The AI wrote an amount that is not word for word in the sources">[amount removed]</span>';
 export function renderAnswer(text, allowed, cite, exactShown){
   const g = guardFigures(text, allowed);
   let html = renderMarkdown(g.text, cite).replace(/\u0001/g, REMOVED_HTML);
-  if (g.removed) html += `<p class="caution">The AI wrote ${g.removed === 1 ? "an amount" : g.removed + " amounts"} not found word for word in ` +
-    `the sources; ${g.removed === 1 ? "it was" : "they were"} removed. ` +
-    (exactShown ? "Use the exact wording from the sources above." : "Check the cited pages for the exact amounts.") + "</p>";
+  if (g.removed) html += `<p class="caution">${g.removed === 1 ? "An amount in the AI's answer wasn't" : g.removed + " amounts in the AI's answer weren't"} ` +
+    `found in the sources and ${g.removed === 1 ? "was" : "were"} removed - ${exactShown ? "use the exact wording above" : "check the cited pages"}.</p>`;
   return {html, removed: g.removed};
 }

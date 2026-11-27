@@ -42,6 +42,81 @@ const safeWaterTerms = base => base.includes("water") && base.some(t => ["safe",
 // "Make water safe / drinkable / clean" and the like: a question whose answer is a dose (exact.js shows it verbatim).
 export const wantsSafeWater = q => safeWaterTerms([...new Set(tok(q))]);
 
+// ---- figures: a number with a unit (exact.js shows them verbatim; amount questions favour passages that have them)
+const NUMW = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter";
+const N1 = `(?:\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
+const NUM = `(?<![\\w.\\/])${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
+const UNIT = "(?:drops?|gtts?|gts|tsp|teaspoon(?:ful)?s?|tbsp|tablespoon(?:ful)?s?|ml|mls|millilit(?:re|er)s?|mg|milligrams?|" +
+  "lit(?:re|er)s?|l|quarts?|qts?|gallons?|gal|pints?|cups?|fl\\.?\\s*oz|ounces?|oz|tablets?|tabs?|ppm|per\\s?cent|percent|%|" +
+  "minutes?|mins?|hours?|hrs?|seconds?|secs?|°\\s*[cf]|degrees(?:\\s+(?:celsius|fahrenheit|c|f))?)(?![a-z])";
+const ADJ = "(?:(?:full|whole|level|heaped|heaping)\\s+)?";
+const SEP = "(?:\\/|\\bper\\b|\\bfor\\s+(?:each|every)\\b|\\bto\\b|\\bin\\b|\\bof\\s+[a-z]+(?:\\s+[a-z]+)?\\s+(?:per|to|in|for\\s+(?:each|every))\\b)";
+// A figure: a number with a unit, with an optional "per gallon" / "/30 MIN" / "of bleach per litre" part.
+export const FIGURE_SRC = `(?<n>${NUM})\\s*(?:-\\s*)?${ADJ}(?:a\\s+)?(?<u>${UNIT})` +
+  `(?:\\s*(?<sep>${SEP})\\s*(?:(?<n2>(?:a|an|each|every)\\b|${N1})\\s*(?:-\\s*)?)?${ADJ}(?<u2>${UNIT}))?`;
+export const figures = s => [...String(s).matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => m[0]);
+
+// The same figure however it is written: number words or digits ("one full minute" = "1 minute"), "%" / "percent",
+// units singular, plural or abbreviated (gtts = drops, tsp = teaspoon, L = litre), "5.25% to 8.25%" = "5.25-8.25 percent".
+const WORDS = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  fifteen: 15, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, ninety: 90, hundred: 100, half: 0.5, quarter: 0.25,
+  a: 1, an: 1, each: 1, every: 1, "½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": 0.125};
+function num(x){
+  x = x.trim().toLowerCase(); if (x in WORDS) return WORDS[x];
+  let m = x.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+)$/); if (m) return +m[1] / +m[2];
+  if (/^\d{1,3},\d{3}$/.test(x)) return +x.replace(",", "");
+  return +x.replace(",", ".");
+}
+const UNITS = [[/^(drops?|gtts?|gts)$/, "drop"], [/^(tsp|teaspoon)/, "tsp"], [/^(tbsp|tablespoon)/, "tbsp"], [/^(ml|mls|millilit)/, "ml"],
+  [/^(mg|milligram)/, "mg"], [/^(l|lit(re|er)s?)$/, "l"], [/^(quart|qt)/, "quart"], [/^(gallon|gal)/, "gallon"], [/^pint/, "pint"], [/^cup/, "cup"],
+  [/^(fl\.?oz|ounce|oz)/, "oz"], [/^tab/, "tablet"], [/^ppm$/, "ppm"], [/^(%|percent)$/, "%"], [/^min/, "min"], [/^(hour|hr)/, "h"],
+  [/^sec/, "s"], [/^(°c|degreesc|degreescelsius)$/, "°c"], [/^(°f|degreesf|degreesfahrenheit)$/, "°f"], [/^degree/, "deg"]];
+const unit = u => { u = u.toLowerCase().replace(/\s+/g, ""); for (const [re, c] of UNITS) if (re.test(u)) return c; return u; };
+const k = n => String(Math.round(n * 10000) / 10000);
+export const TIME_UNITS = new Set(["min", "h", "s", "°c", "°f", "deg"]);
+// {nums: [n] or [a, b], u, tail: [n, unit] or null}
+export function parseFigure(g){
+  const nums = g.n.split(/\s*(?:-|–|\bto\b)\s*/i).filter(Boolean).map(num), u = unit(g.u);
+  if (!g.u2) return {nums, u, tail: null};
+  const n2 = g.n2 ? num(g.n2) : 1, u2 = unit(g.u2);
+  if (/^to$/i.test(g.sep.trim()) && u2 === u && nums.length === 1 && g.n2) return {nums: [nums[0], n2], u, tail: null};  // 5.25% to 8.25%
+  return {nums, u, tail: [n2, u2]};
+}
+const atom = (n, u) => `${k(n)} ${u}`;
+function figuresIn(text){
+  const atoms = new Set(), ranges = new Set(), compounds = new Set(), lines = [];
+  for (const line of String(text).split(/\n|(?<=[.;!?])\s+/)){
+    const here = new Set();
+    for (const m of line.matchAll(new RegExp(FIGURE_SRC, "gi"))){
+      const f = parseFigure(m.groups), head = f.nums.map(n => atom(n, f.u));
+      head.forEach(a => { atoms.add(a); here.add(a); });
+      if (f.nums.length === 2) ranges.add(head.join("-"));
+      if (f.tail){ const t = atom(...f.tail); atoms.add(t); here.add(t); compounds.add(head.join("-") + " / " + t); }
+    }
+    if (here.size) lines.push(here);
+  }
+  return {atoms, ranges, compounds, lines};
+}
+let memo = ["", null];
+// Is this figure (a regexp match's groups) in the text, as the same number(s) and unit, however written? A "per" figure
+// ("5 drops per quart") also counts when its two parts are on one line of the text (a table row: "1 quart/1 liter 5 drops").
+export function figureInText(g, text){
+  if (memo[0] !== text) memo = [text, figuresIn(text)];
+  const F = memo[1], f = parseFigure(g), head = f.nums.map(n => atom(n, f.u));
+  const headOk = head.every(a => F.atoms.has(a)) || (head.length === 2 && F.ranges.has(head.join("-")));
+  if (!f.tail) return headOk;
+  const t = atom(...f.tail);
+  return F.compounds.has(head.join("-") + " / " + t) || F.lines.some(l => l.has(t) && head.every(a => l.has(a)));
+}
+// How many dose figures (not times or temperatures) a passage holds, for ranking amount questions.
+export const doseFigures = t => [...String(t).matchAll(new RegExp(FIGURE_SRC, "gi"))].filter(m => !TIME_UNITS.has(unit(m.groups.u))).length;
+
+const AMOUNT_Q = new RegExp("\\bhow\\s+(?:much|many|long|often|strong)\\b|\\b(?:dose|doses|dosage|dosing|amounts?|quantit(?:y|ies)|ratio|proportions?|" +
+  "dilut\\w*|strength|concentration|drops?|teaspoons?|tablespoons?|tsp|tbsp|ml|millilit\\w*|litres?|liters?|quarts?|gallons?|tablets?|" +
+  "ppm|percent|per\\s?cent|minutes?|hours?|temperature|degrees)\\b|%|°", "i");
+// A question about amounts: an amount word, or "make water safe to drink" (whose answer is a dose).
+export const quantityQuestion = q => AMOUNT_Q.test(q) || wantsSafeWater(q);
+
 export function createIndex(chunks){
   const df = new Map(); let total = 0;
   chunks.forEach((c, i) => { c.i = i; c.tf = new Map(); const ts = tok(c.t); c.len = ts.length; total += ts.length;
@@ -50,12 +125,16 @@ export function createIndex(chunks){
   return {chunks, df, avgdl: total / Math.max(1, chunks.length)};
 }
 
-export function scoreAll(ix, q){
-  const qt = queryTerms(q), N = ix.chunks.length, k1 = 1.4, b = 0.75, scored = [];
+// For a question about amounts, a passage scores up to DOSE_BOOST_MAX x more for the dose figures it holds
+// (DOSE_BOOST each, at most DOSE_BOOST_CAP of them): the table with the drops ranks above the prose around it.
+export const DOSE_BOOST = 0.15, DOSE_BOOST_CAP = 8;
+export function scoreAll(ix, q, {figures: useFigures = true} = {}){
+  const qt = queryTerms(q), N = ix.chunks.length, k1 = 1.4, b = 0.75, scored = [], dose = useFigures && quantityQuestion(q);
   for (const c of ix.chunks){ let s = 0;
     for (const [t, wt] of qt){ const f = c.tf.get(t); if (!f) continue;
       const n = ix.df.get(t); const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
       s += wt * idf * f * (k1 + 1) / (f + k1 * (1 - b + b * c.len / ix.avgdl)); }
+    if (s > 0 && dose){ if (c.ndose === undefined) c.ndose = doseFigures(c.t); s *= 1 + DOSE_BOOST * Math.min(c.ndose, DOSE_BOOST_CAP); }
     if (s > 0) scored.push([s * (c.boost || 1), c]); }
   return scored.sort((a, b) => b[0] - a[0]);
 }
