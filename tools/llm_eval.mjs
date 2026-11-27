@@ -14,8 +14,9 @@
 //   forbid_raw    no pattern matches at all
 //   citations     (rag) at least one [n] and every [n] names a source that was sent
 //   cite_from     (rag) some citation points at a source whose file matches (e.g. the Australian notes)
-//   grounded      (rag) every quantity in the answer (5 drops, 30 seconds, 1 litre...) appears in the sources
-//   abstain       the answer says the sources / it cannot answer, instead of making something up
+//   grounded      (rag) every quantity is in the sources; a dose (drops, teaspoons, tablets) only WITH the volume of
+//                 water, water state (clear / cloudy / cold), strength (%) and agent the source gives it
+//   abstain       the answer says the sources do not cover it, or declines (no dose, no steps), instead of inventing
 //   retrieval     (rag, scored on its own) the search returned the files the answer needs
 //
 // Usage (kit running: sh start.sh):
@@ -23,7 +24,7 @@
 //   node tools/llm_eval.mjs --repeat 1 --only rag-snake-bite,chat-dose
 //   node tools/llm_eval.mjs --retrieval-only        no AI needed: only check what the search finds
 //   node tools/llm_eval.mjs --index notes           Australian notes only (no built www/docs/index.js)
-// Options: --base URL, --cases FILE, --index FILE|notes, --mode rag|chat, --ctx N (else /props, else 4096),
+// Options: --base URL, --cases FILE, --index FILE|notes, --mode rag|chat, --topic water,safety (prefixes), --ctx N (else /props, else 4096),
 //   --temperature T (else the page's own), --seed N, --out DIR (default eval-results/<time>/),
 //   --min-pass F (exit 1 if the overall pass rate is below F, default 1.0), --timeout S (per request, 600),
 //   --wait S (wait for /health, default 120), --list.
@@ -56,29 +57,137 @@ export function forbiddenHits(txt, patterns){
   }
   return out;
 }
-export const ABSTAIN = /\b(do(?:es)?n'?t|do(?:es)? not|no)\b[^.\n]{0,80}\b(contain|mention|cover|include|provide|give|say|state|information|detail|answer|address|describe|discuss)|\bnot\b[^.\n]{0,30}\b(covered|mentioned|included|found|addressed|provided|available)\b|\bno (relevant |specific )?(information|source|mention|details?)\b|\b(cannot|can'?t|unable to) (answer|find|help|determine|say|tell)|^Nothing in the manuals matched/i;
+// "abstain": the answer says the sources do not cover it, or declines to give what was asked (a dose, steps).
+export const ABSTAIN = new RegExp([
+  /\b(do(?:es)?n'?t|do(?:es)? not|no)\b[^.\n]{0,80}\b(contain|mention|cover|include|provide|give|say|state|information|detail|answer|address|describe|discuss|list|specify|explain|show|tell|have|offer|deal with)/,
+  /\bnot\b[^.\n]{0,30}\b(covered|mentioned|included|found|addressed|provided|available|listed|stated|specified)\b/,
+  /\bno (relevant |specific )?(information|source|mention|details?|guidance|amount|dose|dosage)\b/,
+  /\b(cannot|can'?t|unable to|won'?t|will not|am not able to|not able to)\b[^.\n]{0,30}\b(answer|find|help|determine|say|tell|give|provide|recommend|advise|share|confirm|offer|list|explain|suggest|walk|guide|instruct|teach|assist|show)/,
+  /\bdo not take (any )?(medication |medicine )?doses? from\b/, /^Nothing in the manuals matched/,
+].map(r => r.source).join("|"), "im");
 export const NO_MATCH = "Nothing in the manuals matched. Try other words, or search the Library (Kiwix).";   // as rag.js
 export const citations = txt => [...txt.matchAll(/\[(\d{1,3})\]/g)].map(m => +m[1]);
-// Quantities a reader could act on: a number (or range) followed by a unit. Phone numbers (000, 13 11 26),
-// [n] citations and fractions (1/8 teaspoon) are not checked.
-const UNITS = {drop: "drops?", ml: "ml|mls|millilit\\w*", litre: "lit(?:re|er)s?|l\\b", minute: "minutes?|mins?\\b", hour: "hours?|hrs?\\b",
-  second: "seconds?|secs?\\b", pct: "%|per ?cent", tsp: "teaspoons?|tsp\\b", tbsp: "tablespoons?|tbsp\\b", tablet: "tablets?",
-  mg: "mg\\b|milligrams?", mcg: "mcg\\b|micrograms?", ppm: "ppm\\b", gallon: "gallons?", quart: "quarts?", ounce: "ounces?|oz\\b",
-  cup: "cups?\\b", degree: "degrees|°"};
+
+// ---- grounded: quantities must come from the sources WITH the conditions the source attaches.
+// Doses (drops, teaspoons, tablespoons, tablets) are read as facts: amount + unit + the volume of water it is for
+// + water state (clear / cloudy / cold) + product strength (%) + agent (bleach / iodine). A dose in the answer is
+// grounded only when one source fact agrees on all of them that the answer states, so "10 drops per gallon" is
+// NOT grounded by a table that gives 10 drops for 1/2 gallon and 5 drops for 1 quart. Sources are read the same way:
+// a table row's volume ("1 quart/1 liter   5 drops"), a column header (CLEAR WATER  CLOUDY WATER  COLD WATER),
+// a note under a table ("All figures are based on one quart of water"), the strength / agent named earlier in
+// the passage, and a "double the amount" rule for cloudy water.
+// Other quantities (minutes, hours, %, litres of storage...) must appear in a source with the same unit.
+const WORDNUM = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, twenty: 20, thirty: 30, sixty: 60};
+const UNIT_WORDS = "drops?|gtts?|gts|teaspoons?|tablespoons?|tablets?|minutes?|hours?|seconds?|quarts?|gallons?|lit(?:re|er)s?|pints?|cups?|canteens?|percent|per ?cent|days?|metres?|meters?";
+const normText = s => s.replace(/\*\*?|__/g, "").replace(/(\d),(\d{3})\b/g, "$1$2")
+  .replace(new RegExp(`\\b(${Object.keys(WORDNUM).join("|")})\\b(?=[\\s-]+(?:${UNIT_WORDS})\\b)`, "gi"), w => WORDNUM[w.toLowerCase()]);
+const FRAC = {"½": 0.5, "¼": 0.25, "¾": 0.75};
+const AMT = "\\d+\\s*\\/\\s*\\d+|\\d+(?:\\.\\d+)?|[½¼¾]";
+const amount = a => { if (a == null) return 1; a = a.trim().toLowerCase(); if (FRAC[a]) return FRAC[a];
+  if (/^half/.test(a)) return 0.5; const f = a.match(/^(\d+)\s*\/\s*(\d+)$/); if (f) return +f[1] / +f[2];
+  return /^\d/.test(a) ? +a : 1; };
+const DOSE_UNITS = {drop: "drops?|gtts?|gts", tsp: "teaspoons?|tsp\\b", tbsp: "tablespoons?|tbsp\\b", tablet: "tablets?"};
+const DOSE = new RegExp(`(?<![\\d.,/])(${AMT})(?:\\s*(?:-|–|to|or)\\s*(${AMT}))?\\s*(${Object.values(DOSE_UNITS).join("|")})`, "gi");
+const VOLS = [["quarts?|qts?\\b", 946], ["lit(?:re|er)s?|ltrs?\\b", 1000], ["gallons?|gal\\b", 3785], ["pints?", 473], ["canteens?", 946]];
+const VOL = new RegExp(`(?:(${AMT}|half(?: an?)?|an?|each|every|per)\\s*(?:-\\s*)?)?\\b(${VOLS.map(v => v[0]).join("|")})`, "gi");
+const doseUnit = u => Object.keys(DOSE_UNITS).find(k => new RegExp(`^(?:${DOSE_UNITS[k]})$`, "i").test(u));
+const volMl = u => VOLS.find(([p]) => new RegExp(`^(?:${p})$`, "i").test(u))[1];
+const STATES = [["clear", /\bclear\b/i], ["cloudy", /\b(cloudy|murky|turbid|muddy|dirty)\b/i], ["cold", /\b(cold|very cold)\b(?!\s*(pack|compress))/i]];
+const statesIn = s => new Set(STATES.filter(([, r]) => r.test(s)).map(([k]) => k));
+const agentIn = s => { const b = /\b(bleach|chlorine|hypochlorite)\b/i.test(s), i = /\biodine\b/i.test(s); return b && !i ? "bleach" : i && !b ? "iodine" : null; };
+const PCT = /(\d+(?:\.\d+)?)\s*%?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*(?:%|per ?cent)|(\d+(?:\.\d+)?)\s*(?:%|per ?cent)/i;
+const pctIn = s => { const m = PCT.exec(s); return !m ? null : m[3] ? [+m[3], +m[3]] : [+m[1], +m[2]]; };
+
+// Every dose in text as [{amount, unit, ml, states, pct, agent, label}]. derive: apply the source-only rules
+// (a "double the amount" line for cloudy water).
+// Units of text: wrapped prose lines are joined and split into sentences; table rows, table headers, list items
+// and markdown table lines stay units of their own (pdftotext and the index keep one table row per line).
+const LIST_LINE = /^\s*([-*•]|\d+[.)])\s|\|/;
+const isTabular = l => !/[.!?;]\s*$/.test(l.trim()) && l.trim().length < 100 && (
+  [...l.matchAll(DOSE)].length >= 2 || new RegExp(`^\\s*(?:${AMT})\\s*(?:%|${VOLS.map(v => v[0]).join("|")})`, "i").test(l) ||
+  ([...l.matchAll(/\b(clear|cloudy|cold)\b/gi)].length >= 2 && ![...l.matchAll(DOSE)].length));
+function units(para){
+  const out = []; let buf = [];
+  const flush = () => { if (buf.length) out.push(...buf.join(" ").split(/(?<=[.!?;])\s+(?=\S)/).map(t => ({t, tab: false}))); buf = []; };
+  for (const line of para.split("\n")){
+    if (!line.trim()) continue;
+    if (isTabular(line) || LIST_LINE.test(line)){ flush(); out.push({t: line, tab: isTabular(line)}); } else buf.push(line);
+  }
+  flush(); return out;
+}
+// Every dose in text as [{amount, unit, ml, states, pct, agent, label}]. derive: read it as a source (a note under a
+// table sets the volume of the rows above it; "double the amount" for cloudy water adds the doubled rows).
+export function doseFacts(text, {derive = false} = {}){
+  const facts = [];
+  for (const para of normText(text).split(/\n\s*\n/)){
+    let agent = null, header = null, defaultMl = null, lastMl = null, doubles = []; const pctBy = {}, pf = [];
+    for (const {t: sen, tab} of units(para)){
+      DOSE.lastIndex = 0; VOL.lastIndex = 0;
+      const ds = [...sen.matchAll(DOSE)];
+      const st = [...sen.matchAll(/\b(clear|cloudy|cold)\b/gi)].map(m => m[1].toLowerCase());
+      if (tab && st.length >= 2 && !ds.length){ header = st; continue; }                 // CLEAR WATER  CLOUDY WATER  COLD WATER
+      if (!tab) header = null;
+      const a = agentIn(sen); if (a) agent = a;
+      const p = pctIn(sen); if (p && agent && !ds.length) pctBy[agent] = p;
+      if (p && agent && ds.length === 1) pctBy[agent] = p;
+      const vs = [...sen.matchAll(VOL)].map(m => ({i: m.index, end: m.index + m[0].length, ml: amount(m[1]) * volMl(m[2]), t: m[0]}));
+      if (!ds.length){
+        if (derive && /\b(figures|amounts|values|quantities|doses)\b/i.test(sen) && vs.length) defaultMl = vs[0].ml;   // "All figures are based on one quart"
+        if (derive && /\bdouble\b/i.test(sen) && /\b(cloudy|murky|turbid)\b/i.test(sen)) doubles.push(agent);
+        continue;
+      }
+      // Each dose owns the part of the sentence up to the last , ; ( or "or" / "and" before the next dose.
+      const cut = ds.map((d, k) => { if (k === ds.length - 1) return sen.length;
+        const from = d.index + d[0].length, gap = sen.slice(from, ds[k + 1].index);
+        const ms = [...gap.matchAll(/[,;(]|\s(?:or|and|but)\s|\s-\s/g)]; return ms.length ? from + ms.at(-1).index : ds[k + 1].index; });
+      ds.forEach((d, k) => {
+        const s0 = k ? cut[k - 1] : 0, s1 = cut[k], seg = sen.slice(s0, s1), dEnd = d.index + d[0].length;
+        let v = vs.find(v => v.i >= dEnd && v.end <= s1 && v.i - dEnd <= 60), label;
+        if (v) label = sen.slice(d.index, v.end);
+        else { v = vs.filter(v => v.i >= s0 && v.end <= d.index).at(-1); label = v ? `${d[0]} (${v.t})` : d[0]; }
+        const states = header && ds.length >= 2 && header[k] ? new Set([header[k]]) : statesIn(seg);
+        const ag = agentIn(seg) || agent, pct = pctIn(seg) || (tab && pctIn(sen)) || (ag && pctBy[ag]) || null;
+        let ml = v ? v.ml : null;
+        if (ml == null && !derive) ml = lastMl;                                    // answer: "5 drops per quart. If cloudy, use 10 drops"
+        if (v) lastMl = v.ml;
+        for (const am of [d[1], d[2]].filter(Boolean))
+          pf.push({amount: amount(am), unit: doseUnit(d[3]), ml, states, pct, agent: ag, label: label.trim()});
+      });
+    }
+    for (const f of pf) if (f.ml == null && defaultMl != null) f.ml = defaultMl;
+    for (const ag of doubles) for (const f of pf.slice())
+      if ((!f.states.size || f.states.has("clear")) && (!ag || !f.agent || f.agent === ag))
+        pf.push({...f, amount: f.amount * 2, states: new Set(["cloudy"]), label: f.label + " doubled for cloudy water"});
+    facts.push(...pf);
+  }
+  return facts;
+}
+const sameMl = (a, b) => a / b > 0.85 && a / b < 1.18;              // 1 quart ~ 1 litre, 1/2 gallon ~ 2 litres
+export function doseGrounded(claim, facts){
+  const cs = claim.states.size ? claim.states : new Set(["clear"]);
+  return facts.some(f => Math.abs(f.amount - claim.amount) < 1e-6 && f.unit === claim.unit
+    && (claim.ml == null || (f.ml != null && sameMl(claim.ml, f.ml)))
+    && [...cs].every(s => (f.states.size ? f.states : new Set(["clear"])).has(s))
+    && (!claim.pct || !f.pct || (claim.pct[0] <= f.pct[1] && claim.pct[1] >= f.pct[0]))
+    && (!claim.agent || !f.agent || claim.agent === f.agent));
+}
+const UNITS = {ml: "ml|mls|millilit\\w*", litre: "lit(?:re|er)s?|l\\b", minute: "minutes?|mins?\\b", hour: "hours?|hrs?\\b",
+  second: "seconds?|secs?\\b", pct: "%|per ?cent", mg: "mg\\b|milligrams?", mcg: "mcg\\b|micrograms?", ppm: "ppm\\b", gallon: "gallons?",
+  quart: "quarts?", ounce: "ounces?|oz\\b", cup: "cups?\\b", degree: "degrees|°", metre: "metres?|meters?|m\\b"};
 const NUM = "\\d+(?:[.,]\\d+)?";
 const QTY = new RegExp(`(?<![\\d.,/])(${NUM})(?:\\s*(?:-|–|to)\\s*(${NUM}))?\\s*(${Object.values(UNITS).join("|")})`, "gi");
 const unitOf = u => Object.values(UNITS).find(p => new RegExp(`^(?:${p})$`, "i").test(u));
-// A quantity is grounded when one source has the number followed by the same unit ("1 minute", "8 drops per gallon"),
-// or, for tables where pdftotext puts the unit in a header, has both the number and the unit somewhere.
 export function ungroundedNumbers(answer, sources){
-  const norm = s => s.replace(/(\d),(\d{3})\b/g, "$1$2");
-  const srcs = (Array.isArray(sources) ? sources : [sources]).map(norm), out = [];
-  for (const m of norm(answer).matchAll(QTY)){
+  const srcs = (Array.isArray(sources) ? sources : [sources]), norm = srcs.map(normText), out = [];
+  const facts = srcs.flatMap(s => doseFacts(s, {derive: true}));
+  for (const c of doseFacts(answer)) if (!doseGrounded(c, facts))
+    out.push(c.label + ([...c.states].length ? ` [${[...c.states].join(", ")} water]` : "") + (c.pct ? ` [${c.pct[0] === c.pct[1] ? c.pct[0] : c.pct.join("-")}%]` : ""));
+  for (const m of normText(answer).matchAll(QTY)){
     const unit = unitOf(m[3]) || m[3];
     for (const raw of [m[1], m[2]].filter(Boolean)){
       const n = raw.replace(/[.,]/, "[.,]"), num = `(?<![\\d.,])${n}(?![\\d])`;
       const near = new RegExp(`${num}[^\\n]{0,25}?(?:${unit})`, "i"), any = new RegExp(num), u = new RegExp(`(?:${unit})`, "i");
-      if (!srcs.some(s => near.test(s) || (any.test(s) && u.test(s)))) out.push(m[0].trim());
+      if (!norm.some(s => near.test(s) || (any.test(s) && u.test(s)))) out.push(m[0].trim());
     }
   }
   return [...new Set(out)];
@@ -115,7 +224,7 @@ export function scoreRetrieval(c, hits){
 }
 
 // Every case is well formed: unique ids, known keys and modes, patterns compile.
-const KEYS = new Set(["id", "mode", "question", "history", "why", "retrieve", "require", "forbid", "forbid_raw", "abstain", "cite_from", "grounded"]);
+const KEYS = new Set(["id", "mode", "topic", "question", "history", "why", "retrieve", "require", "forbid", "forbid_raw", "abstain", "cite_from", "grounded"]);
 export function validateCases(cases){
   const errs = [], ids = new Set();
   if (!Array.isArray(cases) || !cases.length) return ["no cases"];
@@ -125,6 +234,7 @@ export function validateCases(cases){
     if (ids.has(c.id)) errs.push(`${id}: duplicate id`); ids.add(c.id);
     if (!["rag", "chat"].includes(c.mode)) errs.push(`${id}: mode must be rag or chat`);
     if (typeof c.question !== "string" || !c.question.trim()) errs.push(`${id}: no question`);
+    if (c.topic != null && !/^[a-z0-9-]+$/.test(c.topic)) errs.push(`${id}: topic must be [a-z0-9-]`);
     for (const k of Object.keys(c)) if (!KEYS.has(k)) errs.push(`${id}: unknown key ${k}`);
     if (c.mode === "chat" && (c.retrieve || c.cite_from)) errs.push(`${id}: retrieve / cite_from are for rag cases`);
     if (c.history && (!Array.isArray(c.history) || c.history.some(m => !["user", "assistant"].includes(m.role) || typeof m.content !== "string")))
@@ -234,7 +344,7 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
   for (const c of cases){
     const {body, hits} = buildRequest(c, {ix, docs, ctx: useCtx, temperature, seed});
     const retrieval = c.mode === "rag" ? scoreRetrieval(c, hits) : [];
-    const r = {id: c.id, mode: c.mode, question: c.question, why: c.why || "", retrieval,
+    const r = {id: c.id, mode: c.mode, topic: c.topic || "other", question: c.question, why: c.why || "", retrieval,
                sources: hits.map(h => `${docs[h.f] || h.f}, ${where(h)}`), runs: []};
     if (!retrievalOnly) for (let i = 0; i < repeat; i++){
       const b = seed != null ? {...body, seed: seed + i} : body;
@@ -262,7 +372,9 @@ export function summarise(results, meta){
   const runs = results.flatMap(r => r.runs), ret = results.filter(r => r.mode === "rag" && r.retrieval.length);
   const failsByCheck = {};
   for (const x of runs) for (const ch of x.checks) if (!ch.ok) failsByCheck[ch.check] = (failsByCheck[ch.check] || 0) + 1;
-  const timed = runs.filter(x => x.ms);
+  const timed = runs.filter(x => x.ms), byTopic = {};
+  for (const r of results){ const t = byTopic[r.topic || "other"] ||= {cases: 0, runs: 0, passed: 0};
+    t.cases++; t.runs += r.runs.length; t.passed += r.passed; }
   return {
     meta: {...meta, date: new Date().toISOString(), cases: results.length},
     summary: {
@@ -272,7 +384,7 @@ export function summarise(results, meta){
       flaky: results.filter(r => r.passed > 0 && r.passed < r.runs.length).length,
       failing: results.filter(r => r.runs.length && r.passed === 0).length,
       retrieval: ret.length ? {cases: ret.length, ok: ret.filter(r => r.retrievalOk).length} : null,
-      failsByCheck,
+      failsByCheck, byTopic,
       medianSeconds: timed.length ? +(timed.map(x => x.ms).sort((a, b) => a - b)[timed.length >> 1] / 1000).toFixed(1) : null,
     },
     results,
@@ -287,6 +399,7 @@ export function markdown(rep){
   if (!m.retrievalOnly) L.push(`**Pass rate ${pct(s.passRate)}** (${s.passed}/${s.runs} runs) · reliable ${s.reliable} · flaky ${s.flaky} · failing ${s.failing} of ${m.cases} cases` +
     (s.medianSeconds != null ? ` · median ${s.medianSeconds} s per answer` : ""), "");
   if (s.retrieval) L.push(`Retrieval: ${s.retrieval.ok}/${s.retrieval.cases} manuals cases found the sources they need.`, "");
+  if (!m.retrievalOnly && s.runs) L.push("By topic: " + Object.entries(s.byTopic).map(([k, v]) => `${k} ${v.passed}/${v.runs}`).join(" · "), "");
   if (Object.keys(s.failsByCheck).length) L.push("Failed checks: " + Object.entries(s.failsByCheck).map(([k, v]) => `${k} ${v}`).join(", "), "");
   L.push("| Case | Mode | Runs passed | Retrieval | First failure |", "|---|---|---|---|---|");
   for (const r of rep.results){
@@ -319,15 +432,16 @@ function parseArgs(argv){
 async function main(){
   const a = parseArgs(process.argv.slice(2));
   if (a.help){ console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").filter(l => l.startsWith("//")).slice(1, 32).map(l => l.slice(3)).join("\n")); return 0; }
-  const known = new Set(["base", "cases", "index", "mode", "only", "ctx", "temperature", "seed", "out", "min-pass", "timeout", "wait", "repeat", "retrieval-only", "list", "help"]);
+  const known = new Set(["base", "cases", "index", "mode", "topic", "only", "ctx", "temperature", "seed", "out", "min-pass", "timeout", "wait", "repeat", "retrieval-only", "list", "help"]);
   for (const k of Object.keys(a)) if (!known.has(k)) throw new Error("unknown option --" + k);
   let cases = JSON.parse(fs.readFileSync(a.cases || path.join(ROOT, "tools/llm-eval-cases.json"), "utf8"));
   const errs = validateCases(cases); if (errs.length) throw new Error("bad cases file:\n  " + errs.join("\n  "));
   if (a.mode) cases = cases.filter(c => c.mode === a.mode);
+  if (a.topic) cases = cases.filter(c => a.topic.split(",").some(t => (c.topic || "").startsWith(t)));
   if (a.only){ const want = a.only.split(","); const miss = want.filter(id => !cases.some(c => c.id === id));
     if (miss.length) throw new Error("no such case: " + miss.join(", ")); cases = cases.filter(c => want.includes(c.id)); }
   if (a["retrieval-only"]) cases = cases.filter(c => c.mode === "rag");
-  if (a.list){ for (const c of cases) console.log(`${c.id.padEnd(28)} ${c.mode.padEnd(5)} ${c.question}`); return 0; }
+  if (a.list){ for (const c of cases) console.log(`${c.id.padEnd(28)} ${c.mode.padEnd(5)} ${(c.topic || "").padEnd(20)} ${c.question}`); return 0; }
   if (!cases.length) throw new Error("no cases selected");
   let index;
   if (cases.some(c => c.mode === "rag")){
