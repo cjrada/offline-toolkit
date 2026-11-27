@@ -824,6 +824,17 @@ await test("medicine: Ask the Manuals shows a source dose word for word with its
       "How many iodine tablets should my child take after fallout? We only have bottled water.",
       "How much iodine should an adult take for radiation exposure from contaminated water?"])
     assert.ok(MD.medicineDoseQuestion(q), q);
+  // a KI clause next to a water-treatment clause is still a KI dose question (review of a05ffeb)
+  for (const q of ["How many iodine tablets should I take after fallout, and how do I purify water?", "How much iodine for radiation, should I clean my water too?"])
+    assert.ok(MD.medicineDoseQuestion(q), q);
+  // asked without an amount or intake word, the answer is still guarded as a medicine answer
+  for (const [q, a] of [["Is iodine useful after fallout, and how do I purify water?", "Adults take 2 iodine tablets once a day."],
+      ["Does iodine help with radiation, should I clean my water too?", "Adults take 2 iodine tablets once a day. Children take half a tablet."]]){
+    assert.ok(!MD.medicineDoseQuestion(q), q);
+    const g = MD.guardMedicine(q, a);
+    assert.doesNotMatch(g.text, /2 iodine tablets|once a day|half a tablet/, g.text); assert.ok(g.removed > 0 && g.text.endsWith(MD.POINTER), q);
+  }
+  assert.ok(!MD.medicineDoseQuestion("How much iodine to treat water after fallout?"), "water treatment");
   const ki = MD.guardMedicine("Does iodine help after the nuclear accident if I drank the water?", "Adults take 2 iodine tablets once a day. Children take half a tablet.");
   assert.doesNotMatch(ki.text, /2 iodine tablets|once a day|half a tablet/, ki.text); assert.ok(ki.removed > 0 && ki.text.endsWith(MD.POINTER));
   // an oral rehydration recipe in a medicine answer is not a dose (optional item of the same review)

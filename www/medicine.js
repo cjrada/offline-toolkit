@@ -73,7 +73,10 @@ const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µs
 // Treating water: an amount for a volume of water, or purifying / disinfecting / treating it. "If I drank the water",
 // "bottled water" or "contaminated water" alone is not.
 const TREATS_WATER = /\b(?:per|in|for|to|into|each)\s+(?:an?\s+|one\s+|each\s+|every\s+|\d+(?:[.,]\d+)?\s*)?(?:lit(?:re|er)s?|l|quarts?|gallons?|canteens?|bottles?|buckets?)\b|\b(?:purif\w*|disinfect\w*|treat(?:s|ing|ed)?|steril[iy][sz]\w*|clean(?:ing)?)\s+(?:\w+\s+){0,2}?water\b|\bwater\s+(?:purif\w*|treatment|disinfect\w*|steril\w*)/i;
-const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s) && !TREATS_WATER.test(s);
+// Each clause on its own: "How many iodine tablets should I take after fallout, and how do I purify water?" asks for a
+// KI dose in its first clause, even though another clause is about treating water.
+const clauses = s => String(s).split(/[,;:?!.]|\b(?:and|but|also|then)\b/i);
+const radiationIodine = s => RADIATION.test(s) && clauses(s).some(c => /\biodine\b/i.test(c) && !TREATS_WATER.test(c));
 const waterOnly = s => WATER.test(s) && !MED.test(s) && !radiationIodine(s);
 
 // Numbers in digits or words ("7.5", "4 to 6", "four", "four to six").
