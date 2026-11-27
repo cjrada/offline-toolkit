@@ -32,7 +32,10 @@ Offline and cheap: parses the workflow file, runs nothing, touches no artifacts 
   non-dry-run publish, with contents: read + pages: write + id-token: write and no secrets. pages.yml runs on
   workflow_dispatch / workflow_call only (main, or a v* tag push via publish-kit), has workflow permissions
   {}, the github-pages environment, its own concurrency group, SHA-pinned upload-pages-artifact and
-  deploy-pages, and no secrets, Google auth or GCP variables.
+  deploy-pages, and no secrets, Google auth or GCP variables. The page artifact is named per run attempt
+  (github.run_id + github.run_attempt) and both deploy-pages steps ask for that exact name, so "Re-run
+  failed jobs" never sees two artifacts with the same name; the deploy is retried once, only after a failed
+  first try, and a failed retry fails the job.
 
 Uses a small parser for the block-style YAML subset GitHub workflows use (no PyYAML needed on the
 runner). It raises on anything it does not understand, so an unexpected layout fails the test instead of
@@ -582,6 +585,34 @@ PAGES_CASES = [
 ]
 
 
+PAGES_ARTIFACT = "github-pages-${{ github.run_id }}-${{ github.run_attempt }}"
+
+
+def check_pages_artifact(steps):
+    """Per-attempt artifact name shared by upload and both deploys; one retry, only after a failure."""
+    problems = []
+    up = [st for st in steps if str(st.get("uses", "")).startswith("actions/upload-pages-artifact@")]
+    deps = [st for st in steps if str(st.get("uses", "")).startswith("actions/deploy-pages@")]
+    if len(up) != 1 or len(deps) != 2:
+        return problems
+    name = norm((up[0].get("with") or {}).get("name"))
+    if name != PAGES_ARTIFACT:
+        problems.append(f"upload-pages-artifact name must be {PAGES_ARTIFACT} (unique per run attempt, so a "
+                        f"re-run never finds two github-pages artifacts), got {name!r}")
+    for st in deps:
+        an = norm((st.get("with") or {}).get("artifact_name"))
+        if an != name or not an:
+            problems.append(f"deploy-pages step {st.get('id')!r} artifact_name must match the uploaded name {name!r}, got {an!r}")
+    first, retry = deps
+    if first.get("id") != "deploy" or norm(first.get("if")) or not is_true(first.get("continue-on-error")):
+        problems.append("first deploy-pages step must be id: deploy, unconditional, continue-on-error: true")
+    if retry.get("id") != "deploy_retry" or norm(retry.get("if")) != "steps.deploy.outcome == 'failure'":
+        problems.append("the deploy retry must be id: deploy_retry and run only if steps.deploy.outcome == 'failure'")
+    if "continue-on-error" in retry:
+        problems.append("the deploy retry must not continue on error: a failed retry has to fail the job")
+    return problems
+
+
 def check_pages(text):
     """Static checks for .github/workflows/pages.yml."""
     try:
@@ -619,9 +650,11 @@ def check_pages(text):
                                     "(manual runs: main only; publish-kit's call: main and v* tags; this repo only)")
     except ValueError as e:
         problems.append(f"pages deploy if: cannot be evaluated ({e}): {c!r}")
-    used = [str(st.get("uses", "")).split("@")[0] for st in job.get("steps") or [] if isinstance(st, dict) and "uses" in st]
-    if used != ["actions/checkout", "actions/upload-pages-artifact", "actions/deploy-pages"]:
-        problems.append(f"pages deploy must use checkout, upload-pages-artifact, deploy-pages, got {used}")
+    steps = [st for st in job.get("steps") or [] if isinstance(st, dict)]
+    used = [str(st.get("uses", "")).split("@")[0] for st in steps if "uses" in st]
+    if used != ["actions/checkout", "actions/upload-pages-artifact", "actions/deploy-pages", "actions/deploy-pages"]:
+        problems.append(f"pages deploy must use checkout, upload-pages-artifact, deploy-pages (+ one retry), got {used}")
+    problems += check_pages_artifact(steps)
     for st in job.get("steps") or []:
         if isinstance(st, dict) and "uses" in st and not SHA_PIN.search(str(st["uses"]).split()[0]):
             problems.append(f"pages.yml: action not pinned to a full commit SHA: {st['uses']}")
@@ -781,7 +814,16 @@ def main():
             ("      name: github-pages\n", "      name: gcs-publish\n", "github-pages"),
             ("      group: pages-deploy\n", "      group: other\n", "concurrency"),
             ("          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n", "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n          K: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n", "secrets"),
-            ("@368f82528645a54fb793d4d04e342629a3f51346", "@v5", "full commit SHA"),
+            ("uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1\n        with:\n          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n\n      - name: Wait",
+             "uses: actions/deploy-pages@v5\n        with:\n          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n\n      - name: Wait",
+             "full commit SHA"),
+            ("uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1\n        with:\n          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n\n      - name: Job",
+             "uses: actions/deploy-pages@v5\n        with:\n          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n\n      - name: Job",
+             "full commit SHA"),
+            # the first deploy must not hard-fail (else the retry never runs) and the retry must ask for the same artifact
+            ("        id: deploy\n        continue-on-error: true\n", "        id: deploy\n", "continue-on-error: true"),
+            ("artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n\n      - name: Job",
+             "artifact_name: github-pages\n\n      - name: Job", "must match the uploaded name"),
             ("    if: >-\n      github.repository == 'cjrada/offline-toolkit' &&\n", "    if: >-\n", "someone/fork"),
             # the tag clause this replaces: it keyed the tag case on the caller's event being push; keep the rule
             # that it must not be required, so the condition never depends on how a called run reports its event
@@ -793,7 +835,17 @@ def main():
             # manual runs from a tag allowed
             (" && github.event_name != 'workflow_dispatch'", "", "workflow_dispatch on refs/tags/v1.0.0"),
             # any branch allowed
-            ("github.ref == 'refs/heads/main' ||", "startsWith(github.ref, 'refs/heads/') ||", "refs/heads/feature")):
+            ("github.ref == 'refs/heads/main' ||", "startsWith(github.ref, 'refs/heads/') ||", "refs/heads/feature"),
+            # back to a fixed artifact name: a re-run would find two github-pages artifacts
+            ("          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n", "          name: github-pages\n",
+             "unique per run attempt"),
+            ("          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}\n", "",
+             "unique per run attempt"),
+            # retry runs unconditionally, or fails softly
+            ("        id: deploy_retry\n        if: steps.deploy.outcome == 'failure'\n", "        id: deploy_retry\n",
+             "deploy retry must be"),
+            ("        id: deploy_retry\n", "        id: deploy_retry\n        continue-on-error: true\n",
+             "must not continue on error")):
         assert pages.count(old_s) == 1, f"pages.yml: {old_s!r}"
         got = check_pages(pages.replace(old_s, new_s))
         assert any(needle in p for p in got), f"pages.yml mutation {needle!r} not caught: {got}"

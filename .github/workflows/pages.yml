@@ -30,7 +30,7 @@ jobs:
       id-token: write  # deploy-pages proves the deployment with GitHub's OIDC token (Pages only)
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy_retry.outputs.page_url }}
     # Two deploys never overlap (a manual rebuild and a publish, or two publishes); a queued one waits.
     concurrency:
       group: pages-deploy
@@ -47,24 +47,54 @@ jobs:
           python3 -I tools/build_site.py --public-url "$R2_PUBLIC_URL" --out "$RUNNER_TEMP/site"
           ls -la "$RUNNER_TEMP/site"
 
+      # The page artifact gets a name of its own for this run attempt. deploy-pages finds its artifact by
+      # listing every artifact in the workflow run, all attempts included, and wants exactly one match. With
+      # the fixed default name (github-pages), "Re-run failed jobs" on a publish-kit run found the previous
+      # attempt's github-pages artifact as well and stopped ("Multiple artifacts named ... count is 2").
+      # When publish-kit calls this workflow, github.run_id / run_attempt are publish-kit's, so the name is
+      # unique per publish run attempt; a manual run of this workflow gets its own run id.
       - name: Upload the page
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ runner.temp }}/site
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # The artifact listing can lag just behind the upload: in publish-kit run 45959588632 (attempt 1) the
+      # list taken half a second after the upload finalized held only the kit zip, so deploy-pages reported
+      # "No artifacts named github-pages". One retry after a short wait covers that; a second failure
+      # fails the job as before. Same action, same SHA, same artifact, no new permissions.
       - name: Deploy to GitHub Pages
         id: deploy
+        continue-on-error: true
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Wait before retrying the deploy
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 30
+
+      - name: Deploy to GitHub Pages (retry)
+        id: deploy_retry
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Job summary
         if: always()
         env:
-          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+          PAGE_URL: ${{ steps.deploy.outputs.page_url || steps.deploy_retry.outputs.page_url }}
           OUTCOME: ${{ steps.deploy.outcome }}
+          RETRY: ${{ steps.deploy_retry.outcome }}
         run: |
           url=$(printf '%s' "$PAGE_URL" | grep -Ex 'https://[A-Za-z0-9._/-]+' || true)
+          result=${OUTCOME:-not run}
+          if [ "$OUTCOME" = failure ] && [ -n "$RETRY" ] && [ "$RETRY" != skipped ]; then
+            result="$RETRY (after one retry)"
+          fi
           {
             echo "## pages · downloads page"
             echo
-            echo "deploy: ${OUTCOME:-not run}${url:+ - [$url]($url)}"
+            echo "deploy: ${result}${url:+ - [$url]($url)}"
           } >> "$GITHUB_STEP_SUMMARY"
