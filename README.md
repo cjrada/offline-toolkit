@@ -28,6 +28,11 @@ built and published: [docs/SETUP.md](docs/SETUP.md). (Publishing needs an R2 tok
 `gcs-publish` environment secrets so it is released only behind that environment's approval on `main` or
 a `v*` tag; it is never a repository secret.)
 
+**Support:** the kits are free. If you would like to help cover hosting (R2 storage and publishing the large
+kits), donations are welcome but entirely optional; the addresses are in the
+[Support hosting](https://cjrada.github.io/offline-toolkit/#support) section of the downloads page
+(they live in `tools/donate.json`).
+
 1. **Format the drive exFAT.** FAT32 cannot hold files over 4 GB (models and ZIMs are bigger), and NTFS is
    awkward on some Linux systems. Windows: right-click the drive → Format → exFAT. Linux: `sudo mkfs.exfat -n KIT /dev/sdX1`.
 2. **Unzip onto the drive.**

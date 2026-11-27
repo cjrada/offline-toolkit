@@ -1,0 +1,17 @@
+{
+  "_comment": "Donation addresses for the Support hosting section of the downloads page (tools/build_site.py). This is the only place they live: the page text, copy buttons and QR codes are all built from these strings, and each QR encodes the address exactly as written here. Keep the Ethereum mixed-case checksum and the bech32 Bitcoin address as they are; tests/test_build_site.py checks both checksums.",
+  "addresses": [
+    {
+      "id": "btc",
+      "label": "Bitcoin",
+      "network": "Bitcoin network.",
+      "address": "bc1qeka2tvn0rzyxulqhqqluvd2lcdz3x5q56uwav6"
+    },
+    {
+      "id": "eth",
+      "label": "Ethereum / USDC (ERC-20)",
+      "network": "Ethereum network (mainnet). Send ETH or USDC (ERC-20).",
+      "address": "0xe3A1aa18Fbc704DDA7A7e0A465AaF09aE11009ab"
+    }
+  ]
+}
