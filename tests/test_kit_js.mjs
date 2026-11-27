@@ -812,6 +812,16 @@ await test("medicine: Ask the Manuals shows a source dose word for word with its
     assert.doesNotMatch(g.text, /2 tablets|once a day|half a tablet|quarter of a tablet/, q + " -> " + g.text); assert.ok(g.removed > 0 && g.text.endsWith(MD.POINTER), q);
   }
   assert.ok(!MD.medicineDoseQuestion("How many iodine tablets per quart of water?"), "iodine for water is still water treatment");
+  // water treatment after fallout is still water treatment (review of adc7c66)
+  for (const q of ["How many iodine tablets per litre of water after nuclear fallout?", "How many iodine tablets per quart of water after a nuclear accident?",
+      "How do I purify water with iodine after radiation fallout?"])
+    assert.ok(!MD.medicineDoseQuestion(q), q);
+  assert.deepEqual(MD.guardMedicine("How many iodine tablets per litre of water after nuclear fallout?", "Use 1 iodine tablet per litre of clear water; 2 if cloudy."),
+    {text: "Use 1 iodine tablet per litre of clear water; 2 if cloudy.", refused: false, removed: 0, pointer: false});
+  assert.ok(MD.medicineDoseQuestion("What dose of iodine tablets for radiation?"), "KI, no water");
+  // an oral rehydration recipe in a medicine answer is not a dose (optional item of the same review)
+  const ors = MD.guardMedicine("Can I give paracetamol with fluids?", "Mix half a teaspoon of salt and 6 teaspoons of sugar in 1 litre of water. Give 2 tablets of paracetamol.").text;
+  assert.match(ors, /half a teaspoon of salt and 6 teaspoons of sugar/); assert.doesNotMatch(ors, /2 tablets/);
   assert.deepEqual([...MD.medicinesIn("Potassium iodide (KI, ThyroSafe) 130 mg")], ["potassium iodide"], "one drug, brand names included");
   const js2 = page("www/docs/rag.js");
   assert.match(js2, /exact = withoutMedicineDoses\(exact\);/);

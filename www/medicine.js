@@ -68,8 +68,10 @@ export const medicineQuestion = q => MED.test(String(q));
 const WATER = /\b(?:water|purif\w*|disinfect\w*|chlorin\w*|iodine|bleach|hypochlorite|aquatabs|potable|steril[iy][sz]\w*)\b/i;
 // A radiation dose is not a medicine dose ("What radiation dose is dangerous?"); the AI answers it as usual.
 const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µsv|usv|rems?|grays?|gy|x-?rays?|fallout|nuclear)\b/i;
-// "Iodine tablets" with a radiation word means potassium iodide (a medicine), not water treatment.
-const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s);
+// "Iodine tablets" with a radiation word means potassium iodide (a medicine), unless the question is about water:
+// "How many iodine tablets per litre of water after nuclear fallout?" is water treatment.
+const WATER_CONTEXT = /\b(?:water|lit(?:re|er)s?|quarts?|gallons?|canteens?|purif\w*|disinfect\w*)\b/i;
+const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s) && !WATER_CONTEXT.test(s);
 const waterOnly = s => WATER.test(s) && !MED.test(s) && !radiationIodine(s);
 
 // Numbers in digits or words ("7.5", "4 to 6", "four", "four to six").
@@ -80,11 +82,11 @@ const N = `${N1}(?:\\s*(?:-|–|to|or)\\s*${N1})?`;
 const ALWAYS = new RegExp(`(?<![\\w.])${N}\\s*(?:mg|milligrams?|mcg|micrograms?|µg|ug|iu|international units?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?(?!\\s*(?:\\/|per)\\s*(?:l\\b|lit))`, "gi");
 const hasAlways = s => new RegExp(ALWAYS.source, "i").test(s);
 // A dose once the text is about a medicine ("5 ml of children's ibuprofen", "two tablets every four hours", "twice a day").
-const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|teaspoons?|tsp|tablespoons?|tbsp|puffs?|doses?|sachets?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
+const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|teaspoons?|tsp|tablespoons?|tbsp|puffs?|doses?|sachets?)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)\\b)(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
   `|\\bevery\\s+${N}\\s*(?:hours?|hrs?|h)\\b|\\b${N1}[- ]hourly\\b` +
   `|\\b(?:once|twice|thrice|${N}\\s*(?:times|x))\\s*(?:(?:a|per|each)\\s+day|daily)\\b|\\bfor\\s+${N}\\s*days\\b` +
   // a fraction of a unit: "half a tablet", "a quarter of a tablet", "one and a half tablets"
-  `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:tablets?|tabs?|capsules?|caplets?|pills?|teaspoons?|tsp|tablespoons?|doses?|sachets?)\\b` +
+  `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:tablets?|tabs?|capsules?|caplets?|pills?|teaspoons?|tsp|tablespoons?|doses?|sachets?)\\b(?!\\s+(?:of\\s+)?(?:table\\s+)?(?:salt|sugar)\\b)` +
   // a daily maximum with no unit: "max 6 in a day", "no more than 8 in 24 hours", "up to 4 a day"
   `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b`, "gi");
 // The earlier user turns of a conversation, as text (history: [{role, content}] or [string]).
