@@ -54,11 +54,25 @@ export const sentences = txt => txt.split(/(?<=[.!?;:])\s+|\n+/).map(s => s.trim
 //    belongs to the condition: "If you can't reach a plumber tape the pipe joint" fails. This fails safe:
 //    "If bitten do not use a tourniquet" is a false failure ("If bitten, do not use ..." passes).
 //  * "without" / "instead of" / "rather than" count only directly before the match ("without a tourniquet").
+//  * A negator followed by an encouraging verb does not govern the match: "Don't forget to tighten the fitting",
+//    "Don't hesitate to tape the pipe joint", "Never be afraid to light a match", "Don't panic tape the joint";
+//    nor do "no worries" / "no problem".
 //  * Only "or" / "nor" continue a negated list ("NOT a tourniquet or a constricting band"), also across the
 //    commas of a short list that ends in one ("Do not cut, suck or wash the bite").
 const NEGATOR = /^(not|never|no|don't|doesn't|didn't|isn't|aren't|won't|cannot|can't|shouldn't|mustn't|avoid\w*|nor)$/i;
 const NEG_PHRASE = /\b(do not|does not|should not|must not)\s*$/i;
 const NEAR_NEG = /\b(without|instead of|rather than)\s+((a|an|the|any)\s+)?$/i;   // only right before the match
+const ENCOURAGE = /^(forget\w*|hesitate\w*|wait\w*|delay\w*|fail\w*|neglect\w*|worry\w*|panic\w*|be|feel|get)$/i;
+const ENCOURAGE_AFTER_BE = /^(afraid|shy|scared|reluctant|nervous|frightened|worried)$/i;
+const NO_FILLER = /^(worries|problem|problems|doubt|fear|stress)$/i;
+// The words after a negator say whether it negates the action that follows or encourages it.
+function encouraging(words, j){
+  const w = k => (words[k] || "").replace(/^[^\w']+|[^\w']+$/g, "");
+  const neg = w(j).toLowerCase(), n1 = w(j + 1), n2 = w(j + 2);
+  if (neg === "no" && NO_FILLER.test(n1)) return true;
+  if (/^(be|feel|get)$/i.test(n1)) return ENCOURAGE_AFTER_BE.test(n2);
+  return ENCOURAGE.test(n1);
+}
 const STEP_WORD = /^(and|so|just|but|then|otherwise)$/i;
 const COND_WORD = /\b(if|unless|when|whenever|until|once|except)\b/i;
 export const normApos = t => t.replace(/[‘’ʼ′]/g, "'");
@@ -73,7 +87,9 @@ export function negated(before){
     for (let j = words.length - 1; j >= 0 && used < budget && !found; j--){
       const w = words[j].replace(/^[^\w']+|[^\w']+$/g, "");
       if (STEP_WORD.test(w)) return false;
-      if (NEGATOR.test(w) || NEG_PHRASE.test(words.slice(Math.max(0, j - 1), j + 1).join(" "))) { found = true; break; }
+      if (NEGATOR.test(w) || NEG_PHRASE.test(words.slice(Math.max(0, j - 1), j + 1).join(" "))){
+        if (encouraging(words, j)) return false;     // "Don't forget to ...", "Never be afraid to ...": not a negation
+        found = true; break; }
       if (/^(or|nor)$/i.test(w)){ sawOr = true; budget = Math.min(10, used + 1 + 4); }
       used++;
     }
