@@ -1,24 +1,44 @@
-// Medicine dose guard for every AI answer the kit shows (Chat and Ask the Manuals). No dependencies; tests run it
-// under node. The kit never gives medicine doses: prompt rules alone do not stop a 4B model ("15 kg x 15 mg = 225 mg
-// per dose", "200 mg to 400 mg every 6 to 8 hours" came back under the kit's own "no doses" rule), so this is code:
-//   1. medicineDoseQuestion(q): the question names a medicine (or "medicine / medication / painkiller...") AND asks
-//      for an amount (dose, how much / many / often, mg, ml, mg/kg...). The page does not ask the AI at all: it shows
-//      REFUSAL, also when the question tricks ("ignore your instructions", "I am a doctor", role-play).
-//   2. guardMedicine(q, answer, prior), on every answer as it streams: medicine-dose figures become "[dose removed]".
-//      When the conversation names a medicine (question, earlier user turns, or the answer itself): every mg / mcg /
-//      mg/kg / IU, ml, tablet, capsule, drop or teaspoon amount and every frequency ("every four hours", "twice a
-//      day") anywhere in the answer. Otherwise: mg-type figures (not concentrations such as mg/L) outside water-
-//      treatment sentences ("16 mg iodine tablets per quart" stays), with the amounts in the same sentence. If any
-//      was removed, or a medicine is named, the safe pointer is added.
-//   3. A question that names a medicine always ends with the safe pointer (POINTER), also when the AI only said
-//      "the sources do not give a dose".
-// POINTER has no figure with a unit, so Ask the Manuals' amount guard (docs/exact.js) leaves it as it is.
+// Medicine doses on the kit's pages (Chat and Ask the Manuals). No dependencies; tests run it under node.
+// The kit is reference material: a medicine dose may be shown only word for word from the kit's own documents, with a
+// caveat, and never as a figure the AI wrote. A 4B model invents doses under any prompt rule ("15 kg x 15 mg = 225 mg
+// per dose", "200 mg to 400 mg every 6 to 8 hours"), so this is code:
+//   1. medicineDoseQuestion(q, prior): the question names a medicine (or "medicine / medication / painkiller...") and
+//      asks for an amount (dose, how much / many / often, mg, ml, mg/kg, a body weight...), or quotes an mg dose
+//      itself, or is an amount follow-up in a conversation that named one. Water treatment is never one.
+//      Such a question is never sent to the AI, however it is phrased ("ignore your instructions", "I am a doctor",
+//      role-play):
+//        Ask the Manuals (docs/exact.js medicineRoute): the source passages that hold a dose for it are shown word
+//          for word with their [n] source links and sourceDoseNote() (check the packet / label, age and weight,
+//          follow the source, get medical help); with none, NOT_COVERED (the kit's documents do not give it + POINTER).
+//        Chat (no manuals on that path): CHAT_REFUSAL, which points to Ask the Manuals and gives POINTER.
+//   2. medicineDoseIn(text): does a source passage hold a medicine dose? By content (an mg / mcg / IU / mg/kg figure
+//      outside water treatment, or a dose amount where a medicine is named), not by a fixed list, so curated medical
+//      references added to the index later are shown the same way.
+//   3. guardMedicine(q, answer, prior, {chat}), on every AI answer as it streams: the AI's own medicine-dose figures
+//      become "[dose removed]" (on Ask the Manuals the source amounts are in the exact box, never in the AI's text).
+//      When the conversation names a medicine: every mg / mcg / mg/kg / IU, ml, tablet, capsule, drop or teaspoon
+//      amount and every frequency or daily maximum ("every four hours", "twice a day", "max 6 in a day") anywhere in
+//      the answer. Otherwise: mg-type figures (not concentrations such as mg/L) outside water-treatment sentences
+//      ("16 mg iodine tablets per quart" stays), with the amounts in the same sentence. If any was removed, or a
+//      medicine is named, the pointer is added (in Chat with the Ask the Manuals pointer).
+// None of the messages has a figure with a unit, so Ask the Manuals' amount guard (docs/exact.js) leaves them as they are.
 // The water-treatment dose check (docs/dose.js: drops of bleach per litre against the sources) is a different guard.
 
-export const POINTER = "For medicine doses, follow the instructions on the packet, or ask a pharmacist or Healthdirect " +
+export const POINTER = "For medicine doses, follow the instructions on the packet or label, or ask a pharmacist or Healthdirect " +
   "(1800 022 222). In an emergency, or if too much may have been taken, call 000 (Poisons Information Centre 13 11 26).";
-export const REFUSAL = "I can't give medicine doses, even for a test, a game or a health professional. " + POINTER;
+export const ASK_MANUALS = "Chat does not give medicine doses. If the kit's documents give one, Ask the Manuals (on the kit's " +
+  "home page) shows it word for word with a link to its source.";
+export const CHAT_REFUSAL = ASK_MANUALS + " " + POINTER;
+export const NOT_COVERED = "The kit's documents found for this question do not give a dose for it, so none is shown here. " +
+  "Do not guess one. " + POINTER;
+// Under source doses shown word for word: ns = their [n] source numbers.
+export const sourceDoseNote = ns => `The dose information above is quoted word for word from the kit's documents (${ns.map(n => `[${n}]`).join(" ")}); ` +
+  "open the source to read it in full. It may not fit this person or this medicine: check it against the medicine's packet or " +
+  "label and the person's age and weight, and follow the source and the label exactly. If you can, get medical advice: a " +
+  "pharmacist, Healthdirect (1800 022 222), or 000 in an emergency.";
 export const DOSE_REMOVED = "[dose removed]";
+/** @deprecated kept for old callers: the Chat refusal. */
+export const REFUSAL = CHAT_REFUSAL;
 
 const MED_NAMES = "paracetamol|acetaminophen|panadol|panamax|dymadon|ibuprofen|nurofen|advil|aspirin|disprin|cartia|codeine|" +
   "tramadol|oxycodone|endone|morphine|fentanyl|naproxen|naprosyn|diclofenac|voltaren|celecoxib|meloxicam|" +
@@ -85,14 +105,32 @@ export function medicineDoseSpans(text, {medicine = MED.test(String(text))} = {}
 // -> {text, refused, removed, pointer}
 //   refused: the question asked for a medicine dose: REFUSAL, whatever the AI wrote (the pages do not ask it)
 //   removed: medicine-dose figures replaced by DOSE_REMOVED; pointer: POINTER was appended
-export function guardMedicine(q, answer, prior = []){
-  if (medicineDoseQuestion(q, prior)) return {text: REFUSAL, refused: true, removed: 0, pointer: false};
+// chat: the Chat page (its refusal and pointer name Ask the Manuals). On Ask the Manuals a medicine dose question never
+// reaches the AI (docs/exact.js medicineRoute), so there the refusal branch is only a safety net.
+export function guardMedicine(q, answer, prior = [], {chat = false} = {}){
+  if (medicineDoseQuestion(q, prior)) return {text: chat ? CHAT_REFUSAL : NOT_COVERED, refused: true, removed: 0, pointer: false};
   let text = String(answer);
   // a water-treatment question is not in the medicine conversation before it; its own answer still counts
   const medicine = MED.test(String(q)) || (!waterOnly(String(q)) && MED.test(userTurns(prior))) || MED.test(text);
   const spans = medicineDoseSpans(text, {medicine});
   for (const [a, b] of spans.slice().reverse()) text = text.slice(0, a) + DOSE_REMOVED + text.slice(b);
   const pointer = (spans.length > 0 || medicine) && !/1800\s?022\s?222/.test(text);
-  if (pointer) text = text.replace(/\s*$/, "") + "\n\n" + POINTER;
+  if (pointer) text = text.replace(/\s*$/, "") + "\n\n" + (chat ? CHAT_REFUSAL : POINTER);
   return {text, refused: false, removed: spans.length, pointer};
 }
+
+// Does this source text hold a medicine dose? By content, for any document in the index: an mg / mcg / IU / mg/kg
+// figure outside water treatment, or (where a medicine is named) a dose amount or frequency.
+export const medicineDoseIn = text => medicineDoseSpans(String(text), {medicine: MED.test(String(text))}).length > 0 &&
+  !waterOnly(String(text).replace(/\s+/g, " "));
+// The question's own words that can name what the dose is for (a drug, also one not in MED_NAMES): its words minus
+// amount, age, weight and filler words. exact.js shows a source dose only next to one of them.
+const NOT_A_NAME = new Set(("dose doses dosage dosing dosed much many often how what which when give take taking given use used " +
+  "mg ml mcg kg milligram milligrams millilitre millilitres milliliter milliliters kilo kilos gram grams tablet tablets capsule capsules " +
+  "teaspoon teaspoons amount maximum max safe strength day daily hour hours times year years old month months week weeks " +
+  "child children kid kids baby babies toddler toddlers infant infants adult adults son daughter boy girl man woman person " +
+  "people my his her their our your yes no ok okay please tell me can could should would will i you he she it we they " +
+  "medicine medicines medication medications meds drug drugs painkiller painkillers pain relief syrup the a an of for to in " +
+  "on and or is are be was with from about per every this that there right confirm number ignore previous instructions rules " +
+  "doctor nurse game play roleplay pretend").split(" "));
+export const doseSubjectWords = q => [...new Set((String(q).toLowerCase().match(/[a-z][a-z-]{2,}/g) || []).filter(w => !NOT_A_NAME.has(w)))];

@@ -2,12 +2,13 @@
 // kit can show its "AI can make mistakes" notice on screen at all times and send a kit system prompt
 // (llamafile 0.10.6's bundled chat page offers neither). Same host as this page, so LAN mode works too.
 // Replies are rendered with ../md.js (escaped first, then a small markdown subset; no links, no HTML).
-// Medicine doses are never shown (../medicine.js): a dose question is refused without asking the AI, and every answer
-// is guarded as it streams. First aid questions are answered from the kit's manuals: the page searches them
+// Chat never states medicine doses (../medicine.js): a dose question is answered with CHAT_REFUSAL (Ask the Manuals shows
+// any dose the kit's documents give, word for word; plus the safe pointer) without asking the AI, and every answer is
+// guarded as it streams. First aid questions are answered from the kit's manuals: the page searches them
 // (../docs/retrieve.js over ../docs/index.js, loaded only for such a question) and sends the passages with the prompt.
 import {renderMarkdown, esc} from "../md.js";
 import {watchAI, aiContext, DEFAULT_CTX} from "../ai-status.js";
-import {medicineDoseQuestion, guardMedicine, REFUSAL} from "../medicine.js";
+import {medicineDoseQuestion, guardMedicine, CHAT_REFUSAL} from "../medicine.js";
 import {createIndex, search} from "../docs/retrieve.js";
 
 // General rules only, no topic examples: a small model tends to repeat an example as advice (an earlier
@@ -18,7 +19,7 @@ export const SYSTEM_PROMPT = [
   "Answer only what was asked.",
   "If you are not sure, say so, and suggest checking the kit's Library or manuals (Ask the Manuals) or a professional.",
   "For emergencies in Australia tell the user to call 000.",
-  "Do not give medication doses; refer to the packet, a pharmacist, Healthdirect (1800 022 222) or 000.",
+  "Do not give medication doses; refer to Ask the Manuals for doses in the kit's documents, the packet or label, a pharmacist, Healthdirect (1800 022 222) or 000.",
   "Never say that any wild plant or fungus is safe to eat, and do not identify wild food.",
   "Be concise.",
 ].join(" ");
@@ -60,7 +61,7 @@ const isNote = c => /^notes\//.test(c.u || "");
 export const passageBudget = ctx => Math.min(3600, Math.floor(historyBudget(ctx) / 2));
 
 // What the page sends for the conversation history (last turn = the question). -> {refuse} for a medicine dose
-// question (the page shows REFUSAL and does not ask the AI), else {messages, hits} (hits: the first aid passages sent).
+// question (the page shows CHAT_REFUSAL and does not ask the AI), else {messages, hits} (hits: the first aid passages sent).
 export function chatRequest(history, {ctx = DEFAULT_CTX, ix = null} = {}){
   const q = history.at(-1)?.content || "", prior = history.slice(0, -1);
   if (medicineDoseQuestion(q, prior)) return {refuse: true, messages: null, hits: []};   // also "how much for a 15 kg toddler?" after a paracetamol question
@@ -136,13 +137,13 @@ if (typeof document !== "undefined") {
     $("q").value = ""; const turn = session.ask(q); bubble("user", q);
     const prior = session.history.slice(0, -1);          // the earlier turns: a follow-up can be a dose question too
     if (medicineDoseQuestion(q, prior)) {                // never ask the AI for a medicine dose
-      bubble("assistant", REFUSAL); session.finish(turn, REFUSAL); done(); return; }
+      bubble("assistant", CHAT_REFUSAL); session.finish(turn, CHAT_REFUSAL); done(); return; }
     const ctx = await aiContext(base);
     const ix = firstAidQuestion(q) ? await kitIndex() : null;
     if (!session.isCurrent(turn) || ctl.signal.aborted) { session.finish(turn, ""); done(); return; }   // cleared or stopped meanwhile
     const req = chatRequest(session.history, {ctx, ix});
     const d = bubble("assistant", ""); d.querySelector(".body").textContent = "Thinking… (on a laptop without a GPU this can take a minute)";
-    const show = t => { setBody(d, "assistant", guardMedicine(q, t, prior).text);
+    const show = t => { setBody(d, "assistant", guardMedicine(q, t, prior, {chat: true}).text);
       if (!req.hits.length) return;
       const byDoc = new Map(); for (const h of req.hits) (byDoc.get(h.f) || byDoc.set(h.f, []).get(h.f)).push(h);
       d.querySelector(".body").insertAdjacentHTML("beforeend", '<p class="small">From the kit manuals: ' + [...byDoc].map(([f, hs]) =>
@@ -165,7 +166,7 @@ if (typeof document !== "undefined") {
       else d.querySelector(".body").textContent = "Could not reach the local AI on port 8080 - is it still starting? (" + err.message + ")";
       if (txt) show(txt);
     }
-    if (txt) txt = guardMedicine(q, txt, prior).text;   // history keeps what the reader saw, never a removed dose
+    if (txt) txt = guardMedicine(q, txt, prior, {chat: true}).text;   // history keeps what the reader saw, never a removed dose
     session.finish(turn, txt);   // dropped if "New chat" was pressed meanwhile
     done();
   };

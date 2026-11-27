@@ -29,7 +29,7 @@
 import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
 import {checkDoses, markSpans} from "./dose.js";
-import {medicineDoseQuestion} from "../medicine.js";
+import {medicineDoseQuestion, medicineDoseIn, doseSubjectWords, sourceDoseNote, NOT_COVERED} from "../medicine.js";
 
 export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
@@ -60,7 +60,7 @@ export const LIMITS = {sources: 4, chars: 2200, leadIn: 3, leadChars: 240, gap: 
 
 // The verbatim excerpts for q: [{n, hit, excerpts: [string]}] (n = the source's number in the answer), or [].
 export function extractExact(ix, q, hits){
-  if (!quantityQuestion(q) || medicineDoseQuestion(q)) return [];   // never show medicine doses, not even a source's
+  if (!quantityQuestion(q) && !medicineDoseQuestion(q)) return [];
   const qt = queryTerms(q), N = Math.max(1, ix.chunks.length);
   const topic = [...qt].filter(([t]) => !GENERIC.has(t) && !/^\d+$/.test(t));
   // idf, at least 1: in a small library (a few PDFs added in the browser) every word is "common"
@@ -148,4 +148,27 @@ export function renderAnswer(text, allowed, cite, exactShown){
   if (g.removed) html += `<p class="caution">${g.removed === 1 ? "An amount in the AI's answer wasn't" : g.removed + " amounts in the AI's answer weren't"} ` +
     `found in the sources and ${g.removed === 1 ? "was" : "were"} removed - ${exactShown ? "use the exact wording above" : "check the cited pages"}.</p>`;
   return {html, removed: g.removed};
+}
+
+// ---- medicine doses: only word for word from the kit's documents, never from the AI (../medicine.js)
+// The excerpts of the box that hold a medicine dose (by content: any document, also one added to the index later) for
+// what the question asks about: one of its own words (the drug, or the condition) must be in the excerpt or in the
+// 300 characters of its source just before it. So a paracetamol question never shows an ibuprofen table.
+export function medicineExcerpts(q, exact){
+  const words = doseSubjectWords(q).map(w => new RegExp(`\\b${w.replace(/[-]/g, "[- ]?")}`, "i"));
+  if (!words.length) return [];
+  return exact.map(b => ({...b, excerpts: b.excerpts.filter(x => {
+    if (!medicineDoseIn(x)) return false;
+    const at = b.hit.t.indexOf(x), ctx = at >= 0 ? b.hit.t.slice(Math.max(0, at - 300), at + x.length) : x;
+    return words.some(w => w.test(ctx));
+  })})).filter(b => b.excerpts.length);
+}
+// What Ask the Manuals shows for a medicine dose question, or for an amount question whose box holds a medicine dose,
+// without asking the AI. -> null (not a medicine dose: the usual path), or {box, text}:
+//   box: the source passages holding the dose, shown word for word with their [n] links (renderExact); text: the caveat
+//   (sourceDoseNote), or with no such passage NOT_COVERED (the kit's documents do not give it + the safe pointer).
+export function medicineRoute(q, exact){
+  const box = medicineExcerpts(q, exact);
+  if (!box.length && !medicineDoseQuestion(q)) return null;
+  return box.length ? {box, text: sourceDoseNote(box.map(b => b.n))} : {box: [], text: NOT_COVERED};
 }

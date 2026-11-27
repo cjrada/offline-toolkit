@@ -2,12 +2,14 @@
 // Answers are rendered with md.js: escaped first, then a small markdown subset; [n] links to source n.
 // For a question about amounts, exact.js shows the source passages that hold them word for word (escaped), the
 // model is told not to write figures, and any figure it writes that is not in those passages is removed.
-// Medicine doses are never shown (../medicine.js): a dose question gets the refusal without asking the AI, every answer
-// has medicine-dose figures removed, and a medicine question always ends with the packet / pharmacist / Healthdirect / 000 pointer.
+// Medicine doses only word for word from the kit's documents (exact.js medicineRoute, ../medicine.js): a medicine dose
+// question is never sent to the AI. The page shows the source passages that hold the dose, with their links and a
+// caveat, or says the kit's documents do not give it (with the packet / pharmacist / Healthdirect / 000 pointer).
+// In every AI answer the AI's own medicine-dose figures are removed.
 import {createIndex, search, buildMessages, sourceBudget, ANSWER_TOKENS, tidyAnswer} from "./retrieve.js";
-import {extractExact, renderExact, renderAnswer, allowedText} from "./exact.js";
+import {extractExact, renderExact, renderAnswer, allowedText, medicineRoute} from "./exact.js";
 import {esc, renderMarkdown} from "../md.js";
-import {medicineDoseQuestion, guardMedicine, REFUSAL} from "../medicine.js";
+import {guardMedicine} from "../medicine.js";
 import {aiContext} from "../ai-status.js";
 const LLM = `${location.protocol}//${location.hostname}:8080/v1/chat/completions`;
 
@@ -58,10 +60,12 @@ $("f").onsubmit = async e => {
   const hits = search(ix, q, {maxChars: sourceBudget(ctx, q)});
   $("srcH").hidden = false;
   $("sources").innerHTML = hits.map(c => `<li><a href="${esc(srcLink(c))}" target="_blank" rel="noopener">${esc(docs[c.f]||c.f)}, ${esc(where(c))}</a><div class="snip">${esc(c.t.slice(0,300))}…</div></li>`).join("") || "<li>No matching passages.</li>";
-  // A medicine dose question: the refusal only, and no exact box (no source amounts beside it), whatever was found.
-  if (medicineDoseQuestion(q)){ $("exact").innerHTML = ""; $("exact").hidden = true;
-    $("answer").classList.add("md"); $("answer").innerHTML = renderMarkdown(REFUSAL); return; }
   const exact = extractExact(ix, q, hits), title = c => docs[c.f]||c.f;
+  // A medicine dose: never from the AI. The box shows only the source passages that hold it (hidden when none does),
+  // and the answer is the caveat, or that the kit's documents do not give it.
+  const med = medicineRoute(q, exact);
+  if (med){ $("exact").innerHTML = renderExact(med.box, title, where, srcLink); $("exact").hidden = !med.box.length;
+    $("answer").classList.add("md"); $("answer").innerHTML = renderMarkdown(med.text, n => hits[n-1] ? srcLink(hits[n-1]) : null); return; }
   $("exact").innerHTML = renderExact(exact, title, where, srcLink); $("exact").hidden = !exact.length;
   if ($("searchOnly").checked || !hits.length){ $("answer").textContent = hits.length ? "" : "Nothing in the manuals matched. Try other words, or search the Library (Kiwix)."; return; }
   const messages = buildMessages(q, hits, title, where, exact), allowed = allowedText(exact, hits);
