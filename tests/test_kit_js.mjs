@@ -11,6 +11,8 @@
 //  * www/chat/chat.js: kit system prompt, history trimming, "New chat" drops an answer still streaming
 //  * www/ai-status.js: status re-checked (3 s until ready, then 30 s); context from models.json
 //  * prompts fit a 4096-token context: sources and chat history are sized from the AI's ctx
+//  * www/docs/dose.js (via exact.js guardAnswer): a dose in an answer is removed unless a source gives it with the same
+//    volume of water, water state, strength and agent ("For a gallon add 10 drops" vs WA DoH's 10 drops per 1/2 gallon)
 //  * www/docs/exact.js: for amount questions the page shows the source passages holding the amounts word for
 //    word (on the real USMC p152 / WA DoH p2 index chunks, tests/fixtures/water-chunks.txt), each with its [n]
 //    link; the model is told not to write figures and invented figures are removed (the same figure written
@@ -417,6 +419,46 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   const s = E.renderAnswer("Pour vinegar for at least 30 seconds, then 5 minutes more.", "Pour vinegar liberally for at least 30 seconds", null, false);
   assert.equal(s.removed, 1); assert.match(s.html, /at least 30 seconds/); assert.match(s.html, /<p class="caution">An amount in the AI's answer wasn't found in the sources and was removed - check the cited pages\.<\/p>$/);
   assert.doesNotMatch(E.renderAnswer("x \u0001 y", "", null).html, /removed/, "the model cannot forge a marker");
+});
+await test("dose guard: a dose must come with the volume, water, strength and agent its source gives it", () => {
+  const hits = R.search(ix2, Q), ex = E.extractExact(ix2, Q, hits), A = E.allowedText(ex, hits);
+  const g = t => E.guardAnswer(t, A), shown = t => g(t).text.replace(/\u0001/g, "[X]");
+  // each figure is somewhere in the WA DoH table ("10 drops", "1 gallon"), so the figure check alone kept these:
+  // 10 drops is the table's figure for 1/2 gallon, 1/4 teaspoon for 1 gallon
+  for (const [bad, want] of [["For a gallon of water add 10 drops of bleach.", "For a gallon of water add [X] of bleach."],
+      ["Add 10 drops of bleach to a gallon of water.", "Add [X] of water."], ["For 1 gallon, use 10 drops.", "For 1 gallon, use [X]."],
+      ["If the water is cloudy, use 5 drops per quart.", "If the water is cloudy, use [X]."],
+      ["Add **10 drops** of bleach to **a gallon** of water.", "Add **[X]** of water."], ["Add ten drops to a gallon.", "Add [X]."]]){
+    if (!/to a gallon/.test(bad)) assert.equal(E.guardFigures(bad, A).removed, 0, "the figure check alone keeps: " + bad);
+    assert.equal(shown(bad), want, bad);
+  }
+  assert.deepEqual(g("For a gallon of water add 10 drops of bleach.").doses, ["10 drops (a gallon)"]);
+  // the water state carries to a second dose in the sentence: "(or 10 drops per quart)" is for cloudy or cold water too
+  assert.equal(shown("For cloudy or cold water: filter it, then add 20 drops per gallon (or 10 drops per quart) [6]."),
+    "For cloudy or cold water: filter it, then add [X] (or [X]) [6].");
+  // stated in full, with every condition of its source row: kept, also when the quart is only in the note under the table
+  for (const ok of ["With 4-6% bleach use 2 drops per quart of clear water, 4 drops if cloudy [2].", "Add 5 drops of 5.25-8.25% bleach per quart or litre [1].",
+      "For 1 quart add 5 drops, for 1 gallon add 1/4 teaspoon [1].", "Use the table: 1 gallon needs 1/4 teaspoon, 1 quart/1 liter 5 drops; or 2GTTS/30 MIN of 4-6% bleach [1].",
+      "10 drops per 1/2 gallon", "1 tsp for 5 gallons", "2 teaspoons for 10 gallons"])
+    assert.equal(g(ok).removed, 0, ok);
+  // grounded only by leaving out a condition (USMC's 1% row): the dose check does not vouch for it, the figure check removes it
+  assert.equal(shown("Use 10 drops per quart."), "Use [X].");
+  const r = E.renderAnswer("For a gallon add 10 drops [1]. Boil for 1 minute [1].", A, null, true);
+  assert.equal(r.removed, 1); assert.equal(r.html.split(E.REMOVED_HTML).length - 1, 1);
+  assert.match(r.html, /An amount in the AI's answer wasn't found in the sources and was removed - use the exact wording above\./);
+  assert.doesNotMatch(E.renderAnswer("x \u0002 y \u0001", A, null).html, /removed/, "no forged marker of either kind");
+  // a table flattened to one line (PDFs added in the browser): each amount is its own row's, never the next row's
+  const flat = WATER.map(w => w.t.replace(/\s+/g, " ")).join("\n\n");
+  for (const ok of ["5 drops per quart", "5 drops per 1 liter", "10 drops per 1/2 gallon", "1/4 teaspoon per gallon", "1 teaspoon per 5 gallons", "2 teaspoons per 10 gallons"])
+    assert.equal(E.guardAnswer(ok, flat).removed, 0, "flattened: " + ok);
+  for (const bad of ["5 drops per 1/2 gallon", "1/4 teaspoon per 5 gallons", "10 drops per gallon", "For a gallon add 10 drops"])
+    assert.equal(E.guardAnswer(bad, flat).removed, 1, "flattened, next row: " + bad);
+  const amountFirst = "Bleach Water 8 drops 1 gallon 1/2 teaspoon 5 gallons";
+  for (const ok of ["8 drops of bleach per gallon", "1/2 teaspoon of bleach per 5 gallons"]) assert.equal(E.guardAnswer(ok, amountFirst).removed, 0, "amount first: " + ok);
+  assert.equal(E.guardAnswer("8 drops per gallon", amountFirst).removed, 1, "not stated in full (no agent): the figure check decides, and pairs nothing here");
+  for (const bad of ["For 1 gallon use 1/2 teaspoon", "For 5 gallons use 8 drops"]) assert.equal(E.guardAnswer(bad, amountFirst).removed, 1, "amount first: " + bad);
+  // each source is read on its own: one source's strength never applies to another's rows
+  assert.equal(E.guardAnswer("Use 2 drops of 4-6% bleach per quart.", "Use 4-6% bleach for laundry.\n\nAdd 2 drops per gallon.").removed, 1);
 });
 await test("exact: no blocks for questions that are not about amounts; out-of-scope still answered 'not in the sources'", () => {
   for (const q of ["What should I do in a bushfire?", "snake bite first aid", "How do I treat a snake bite?", "How do I fix a car engine?"]){

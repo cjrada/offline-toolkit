@@ -20,10 +20,15 @@
 //   4. renderAnswer(): every figure in the model's answer that is not in the sources sent (same number(s) and unit,
 //      however written: "one full minute" = "1 minute", "5.25% to 8.25%" = "5.25-8.25 percent"; a "per" figure must be
 //      in the sources as such or as one table row) is removed and marked, with a caution under the answer.
+//   5. Before that, the dose guard (dose.js): a dose (drops, teaspoons, tablespoons, tablets) must also match one source
+//      fact on its volume of water, clear / cloudy / cold water, strength and agent. "For a gallon of water add 10 drops
+//      of bleach" passes the figure check ("10 drops" and "1 gallon" are each in the WA DoH table) but not this one:
+//      10 drops is that table's figure for 1/2 gallon. This runs on every answer, amount question or not.
 //   Retrieval (retrieve.js scoreAll) also ranks passages with dose figures higher for amount questions.
 
 import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
+import {checkDoses, markSpans} from "./dose.js";
 
 export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
@@ -109,7 +114,8 @@ export function renderExact(blocks, title, where, link){
 }
 
 // The text the answer's figures are checked against: all the sources sent (the excerpts shown are slices of them).
-export const allowedText = (blocks, hits) => [...hits.map(h => h.t), ...blocks.flatMap(b => b.excerpts)].join("\n");
+// A blank line between sources: the dose guard reads each on its own (one source's bleach strength is not another's).
+export const allowedText = (blocks, hits) => [...hits.map(h => h.t), ...blocks.flatMap(b => b.excerpts)].join("\n\n");
 
 // Figures in the answer that are not in `allowed` (same numbers and unit, however written: see retrieve.js
 // figureInText) become a marker. -> {text, removed}
@@ -118,9 +124,25 @@ export function guardFigures(text, allowed){
   text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), (...a) => figureInText(a.at(-1), allowed) ? a[0] : (removed++, "\u0001"));
   return {text, removed};
 }
+// Both guards, in one pass over the answer: a dose (dose.js) is removed when no source gives it with its conditions,
+// and kept when the answer states it in full, with every condition its source fact has ("2 drops per quart of clear
+// 4-6% bleach" for a USMC row whose quart is in the note under the table); any other figure, and a dose not stated
+// in full, must be in the sources (figureInText). The model cannot forge a marker (\u0001 is dropped first).
+// -> {text, removed, doses: [description of each dose removed]}
+export function guardAnswer(text, allowed){
+  text = String(text).replace(/\u0001/g, "");
+  const d = checkDoses(text, allowed), over = (s, [a, b]) => s.some(([x, y]) => a < y && b > x), inside = (s, [a, b]) => s.some(([x, y]) => a >= x && b <= y);
+  const cut = [...d.bad];
+  for (const m of text.matchAll(new RegExp(FIGURE_SRC, "gi"))){
+    const r = [m.index, m.index + m[0].length];
+    if (over(d.bad, r) || inside(d.full, r)) continue;
+    if (!figureInText(m.groups, allowed)) cut.push(r);
+  }
+  return {...markSpans(text, cut), doses: d.doses};
+}
 export const REMOVED_HTML = '<span class="removed" title="The AI wrote an amount that is not word for word in the sources">[amount removed]</span>';
 export function renderAnswer(text, allowed, cite, exactShown){
-  const g = guardFigures(text, allowed);
+  const g = guardAnswer(text, allowed);
   let html = renderMarkdown(g.text, cite).replace(/\u0001/g, REMOVED_HTML);
   if (g.removed) html += `<p class="caution">${g.removed === 1 ? "An amount in the AI's answer wasn't" : g.removed + " amounts in the AI's answer weren't"} ` +
     `found in the sources and ${g.removed === 1 ? "was" : "were"} removed - ${exactShown ? "use the exact wording above" : "check the cited pages"}.</p>`;

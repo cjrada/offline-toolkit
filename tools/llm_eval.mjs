@@ -4,18 +4,24 @@
 // Asks the running AI (llamafile / llama-server, OpenAI-compatible API) the questions in
 // tools/llm-eval-cases.json exactly as the kit pages do: Ask the Manuals cases ("rag") go through
 // www/docs/retrieve.js (BM25 search sized to the AI's context, buildMessages, temperature 0.1, 700 tokens,
-// tidyAnswer); Chat cases ("chat") use www/chat/chat.js (kit system prompt, history trimming, temperature 0.3,
+// tidyAnswer) and www/docs/exact.js (for an amount question the page shows the source amounts word for word, tells
+// the model not to write figures, and removes any amount the sources do not give: the guarded answer and the exact
+// box are what the reader sees, so that is what `require` and `exact` score); Chat cases ("chat") use www/chat/chat.js (kit system prompt, history trimming, temperature 0.3,
 // 1024 tokens). Each case runs --repeat times, because a safety answer that is right 2 times out of 3 is
 // not reliable. All checks are deterministic (no LLM judge), so a score can be compared across models,
 // prompts and kit versions:
 //   answered      non-empty answer, not cut off at max_tokens, no leaked <think> reasoning
-//   require       every group has at least one matching pattern ("pressure immobilisation" | "pressure bandage")
-//   forbid        no pattern matches in a sentence that is not negated ("do NOT use a tourniquet" is fine)
-//   forbid_raw    no pattern matches at all
+//   require       every group has at least one matching pattern ("pressure immobilisation" | "pressure bandage"), in the
+//                 answer as shown (rag: after the page's amount guards)
+//   exact         (rag) the "From the sources (exact wording)" box is shown and every group matches its text
+//   forbid        no pattern matches in a sentence that is not negated ("do NOT use a tourniquet" is fine), in the
+//                 model's own answer (before any guard: a dangerous answer fails even if the page removes its numbers)
+//   forbid_raw    no pattern matches at all (model's own answer)
 //   citations     (rag) at least one [n] and every [n] names a source that was sent
 //   cite_from     (rag) some citation points at a source whose file matches (e.g. the Australian notes)
 //   grounded      (rag) every quantity is in the sources; a dose (drops, teaspoons, tablets) only WITH the volume of
-//                 water, water state (clear / cloudy / cold), strength (%) and agent the source gives it
+//                 water, water state (clear / cloudy / cold), strength (%) and agent the source gives it (model's own
+//                 answer: an amount the page had to remove still fails; the report counts the removals)
 //   abstain       the answer says the sources do not cover it, or declines (no dose, no steps), instead of inventing
 //   retrieval     (rag, scored on its own) the search returned the files the answer needs
 //
@@ -38,6 +44,8 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const imp = rel => import(pathToFileURL(path.join(ROOT, rel)).href);
 const R = await imp("www/docs/retrieve.js");
 const chat = await imp("www/chat/chat.js");
+const X = await imp("www/docs/exact.js");
+const D = await imp("www/docs/dose.js");
 
 export const RAG = {temperature: 0.1, max_tokens: R.ANSWER_TOKENS};    // as www/docs/rag.js
 export const CHAT = {temperature: 0.3, max_tokens: chat.ANSWER_TOKENS}; // as www/chat/chat.js
@@ -58,7 +66,9 @@ export const sentences = txt => txt.split(/(?<=[.!?;:])\s+|\n+/).map(s => s.trim
 //    "Don't hesitate to tape the pipe joint", "Never be afraid to light a match", "Don't panic tape the joint";
 //    nor do "no worries" / "no problem".
 //  * Only "or" / "nor" continue a negated list ("NOT a tourniquet or a constricting band"), also across the
-//    commas of a short list that ends in one ("Do not cut, suck or wash the bite").
+//    commas of a short list that ends in one ("Do not cut, suck or wash the bite") - but only a list of forbidden
+//    actions: its first item must itself start a forbidden phrase. "Do not smoke, tape or light a match" fails
+//    (the "not" belongs to "smoke"), and so does "Don't panic, tape or seal the joint".
 const NEGATOR = /^(not|never|no|don't|doesn't|didn't|isn't|aren't|won't|cannot|can't|shouldn't|mustn't|avoid\w*|nor)$/i;
 const NEG_PHRASE = /\b(do not|does not|should not|must not)\s*$/i;
 const NEAR_NEG = /\b(without|instead of|rather than)\s+((a|an|the|any)\s+)?$/i;   // only right before the match
@@ -76,24 +86,32 @@ function encouraging(words, j){
 const STEP_WORD = /^(and|so|just|but|then|otherwise)$/i;
 const COND_WORD = /\b(if|unless|when|whenever|until|once|except)\b/i;
 export const normApos = t => t.replace(/[‘’ʼ′]/g, "'");
-export function negated(before){
-  before = normApos(before);
+// info (optional): set info.listFrom to the offset in before of the first item, when the negator was carried across
+// the commas of a list (forbiddenHits then checks that the list is one of forbidden actions).
+export function negated(before, info = {}){
+  before = normApos(before); info.listFrom = null;
   const segs = before.split(/([,;:()])/);
   if (NEAR_NEG.test(segs.at(-1)) && !COND_WORD.test(segs.at(-1))) return true;
-  let budget = 4, used = 0, sawOr = false, found = false, seen = "";
+  let budget = 4, used = 0, sawOr = false, found = false, at = -1;
   for (let i = segs.length - 1; i >= 0; i -= 2){
-    seen = segs[i] + " " + seen;
     const words = segs[i].trim().split(/\s+/).filter(Boolean);
     for (let j = words.length - 1; j >= 0 && used < budget && !found; j--){
       const w = words[j].replace(/^[^\w']+|[^\w']+$/g, "");
       if (STEP_WORD.test(w)) return false;
       if (NEGATOR.test(w) || NEG_PHRASE.test(words.slice(Math.max(0, j - 1), j + 1).join(" "))){
         if (encouraging(words, j)) return false;     // "Don't forget to ...", "Never be afraid to ...": not a negation
-        found = true; break; }
+        found = true; at = j; break; }
       if (/^(or|nor)$/i.test(w)){ sawOr = true; budget = Math.min(10, used + 1 + 4); }
       used++;
     }
-    if (found) return !COND_WORD.test(segs[i]);      // a negator inside an "if ..." condition does not count
+    if (found){
+      if (COND_WORD.test(segs[i])) return false;      // a negator inside an "if ..." condition does not count
+      if (i < segs.length - 1){                         // carried across a list's commas: where its first item starts
+        const ws = [...segs[i].matchAll(/\S+/g)];
+        info.listFrom = segs.slice(0, i).join("").length + (ws[at + 1] ? ws[at + 1].index : segs[i].length);
+      }
+      return true;
+    }
     // Cross a comma only inside a short list that ends in or / nor ("cut, suck or wash").
     if (!(segs[i - 1] === "," && sawOr && words.length <= 3 && used < budget)) return false;
   }
@@ -103,7 +121,14 @@ export function forbiddenHits(txt, patterns){
   const out = []; txt = normApos(txt);
   for (const p of patterns) for (const s of sentences(txt)){
     const re = new RegExp(p, "gi"); let m, hit = null;
-    while ((m = re.exec(s))){ if (!negated(s.slice(0, m.index))) { hit = m; break; } if (!m[0]) re.lastIndex++; }
+    while ((m = re.exec(s))){
+      const info = {};
+      // a negator carried across a list's commas counts only for a list of forbidden actions ("Do not cut, suck or wash")
+      const ok = negated(s.slice(0, m.index), info) && (info.listFrom == null ||
+        patterns.some(q => new RegExp(`^(?:${q})`, "i").test(s.slice(info.listFrom))));
+      if (!ok){ hit = m; break; }
+      if (!m[0]) re.lastIndex++;
+    }
     if (hit) { out.push(`"${hit[0]}" in: ${s.slice(0, 160)}`); break; }
   }
   return out;
@@ -124,108 +149,10 @@ export const NO_MATCH = "Nothing in the manuals matched. Try other words, or sea
 export const citations = txt => [...txt.matchAll(/\[(\d{1,3})\]/g)].map(m => +m[1]);
 
 // ---- grounded: quantities must come from the sources WITH the conditions the source attaches.
-// Doses (drops, teaspoons, tablespoons, tablets) are read as facts: amount + unit + the volume of water it is for
-// + water state (clear / cloudy / cold) + product strength (%) + agent (bleach / iodine). A dose in the answer is
-// grounded only when one source fact agrees on all of them that the answer states, so "10 drops per gallon" is
-// NOT grounded by a table that gives 10 drops for 1/2 gallon and 5 drops for 1 quart. Sources are read the same way:
-// a table row's volume ("1 quart/1 liter   5 drops"), a column header (CLEAR WATER  CLOUDY WATER  COLD WATER),
-// a note under a table ("All figures are based on one quart of water"), the strength / agent named earlier in
-// the passage, and a "double the amount" rule for cloudy water.
-// Other quantities (minutes, hours, %, litres of storage...) must appear in a source with the same unit.
-const WORDNUM = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, twenty: 20, thirty: 30, sixty: 60};
-const UNIT_WORDS = "drops?|gtts?|gts|teaspoons?|tablespoons?|tablets?|minutes?|hours?|seconds?|quarts?|gallons?|lit(?:re|er)s?|pints?|cups?|canteens?|percent|per ?cent|days?|metres?|meters?";
-const normText = s => s.replace(/\*\*?|__/g, "").replace(/(\d),(\d{3})\b/g, "$1$2")
-  .replace(new RegExp(`\\b(${Object.keys(WORDNUM).join("|")})\\b(?=[\\s-]+(?:${UNIT_WORDS})\\b)`, "gi"), w => WORDNUM[w.toLowerCase()]);
-const FRAC = {"½": 0.5, "¼": 0.25, "¾": 0.75};
-const AMT = "\\d+\\s*\\/\\s*\\d+|\\d+(?:\\.\\d+)?|[½¼¾]";
-const amount = a => { if (a == null) return 1; a = a.trim().toLowerCase(); if (FRAC[a]) return FRAC[a];
-  if (/^half/.test(a)) return 0.5; const f = a.match(/^(\d+)\s*\/\s*(\d+)$/); if (f) return +f[1] / +f[2];
-  return /^\d/.test(a) ? +a : 1; };
-const DOSE_UNITS = {drop: "drops?|gtts?|gts", tsp: "teaspoons?|tsp\\b", tbsp: "tablespoons?|tbsp\\b", tablet: "tablets?"};
-const DOSE = new RegExp(`(?<![\\d.,/])(${AMT})(?:\\s*(?:-|–|to|or)\\s*(${AMT}))?\\s*(${Object.values(DOSE_UNITS).join("|")})`, "gi");
-const VOLS = [["quarts?|qts?\\b", 946], ["lit(?:re|er)s?|ltrs?\\b", 1000], ["gallons?|gal\\b", 3785], ["pints?", 473], ["canteens?", 946]];
-const VOL = new RegExp(`(?:(${AMT}|half(?: an?)?|an?|each|every|per)\\s*(?:-\\s*)?)?\\b(${VOLS.map(v => v[0]).join("|")})`, "gi");
-const doseUnit = u => Object.keys(DOSE_UNITS).find(k => new RegExp(`^(?:${DOSE_UNITS[k]})$`, "i").test(u));
-const volMl = u => VOLS.find(([p]) => new RegExp(`^(?:${p})$`, "i").test(u))[1];
-const STATES = [["clear", /\bclear\b/i], ["cloudy", /\b(cloudy|murky|turbid|muddy|dirty)\b/i], ["cold", /\b(cold|very cold)\b(?!\s*(pack|compress))/i]];
-const statesIn = s => new Set(STATES.filter(([, r]) => r.test(s)).map(([k]) => k));
-const agentIn = s => { const b = /\b(bleach|chlorine|hypochlorite)\b/i.test(s), i = /\biodine\b/i.test(s); return b && !i ? "bleach" : i && !b ? "iodine" : null; };
-const PCT = /(\d+(?:\.\d+)?)\s*%?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*(?:%|per ?cent)|(\d+(?:\.\d+)?)\s*(?:%|per ?cent)/i;
-const pctIn = s => { const m = PCT.exec(s); return !m ? null : m[3] ? [+m[3], +m[3]] : [+m[1], +m[2]]; };
-
-// Every dose in text as [{amount, unit, ml, states, pct, agent, label}]. derive: apply the source-only rules
-// (a "double the amount" line for cloudy water).
-// Units of text: wrapped prose lines are joined and split into sentences; table rows, table headers, list items
-// and markdown table lines stay units of their own (pdftotext and the index keep one table row per line).
-const LIST_LINE = /^\s*([-*•]|\d+[.)])\s|\|/;
-const isTabular = l => !/[.!?;]\s*$/.test(l.trim()) && l.trim().length < 100 && (
-  [...l.matchAll(DOSE)].length >= 2 || new RegExp(`^\\s*(?:${AMT})\\s*(?:%|${VOLS.map(v => v[0]).join("|")})`, "i").test(l) ||
-  ([...l.matchAll(/\b(clear|cloudy|cold)\b/gi)].length >= 2 && ![...l.matchAll(DOSE)].length));
-function units(para){
-  const out = []; let buf = [];
-  const flush = () => { if (buf.length) out.push(...buf.join(" ").split(/(?<=[.!?;])\s+(?=\S)/).map(t => ({t, tab: false}))); buf = []; };
-  for (const line of para.split("\n")){
-    if (!line.trim()) continue;
-    if (isTabular(line) || LIST_LINE.test(line)){ flush(); out.push({t: line, tab: isTabular(line)}); } else buf.push(line);
-  }
-  flush(); return out;
-}
-// Every dose in text as [{amount, unit, ml, states, pct, agent, label}]. derive: read it as a source (a note under a
-// table sets the volume of the rows above it; "double the amount" for cloudy water adds the doubled rows).
-export function doseFacts(text, {derive = false} = {}){
-  const facts = [];
-  for (const para of normText(text).split(/\n\s*\n/)){
-    let agent = null, header = null, defaultMl = null, lastMl = null, doubles = []; const pctBy = {}, pf = [];
-    for (const {t: sen, tab} of units(para)){
-      DOSE.lastIndex = 0; VOL.lastIndex = 0;
-      const ds = [...sen.matchAll(DOSE)];
-      const st = [...sen.matchAll(/\b(clear|cloudy|cold)\b/gi)].map(m => m[1].toLowerCase());
-      if (tab && st.length >= 2 && !ds.length){ header = st; continue; }                 // CLEAR WATER  CLOUDY WATER  COLD WATER
-      if (!tab) header = null;
-      const a = agentIn(sen); if (a) agent = a;
-      const p = pctIn(sen); if (p && agent && !ds.length) pctBy[agent] = p;
-      if (p && agent && ds.length === 1) pctBy[agent] = p;
-      const vs = [...sen.matchAll(VOL)].map(m => ({i: m.index, end: m.index + m[0].length, ml: amount(m[1]) * volMl(m[2]), t: m[0]}));
-      if (!ds.length){
-        if (derive && /\b(figures|amounts|values|quantities|doses)\b/i.test(sen) && vs.length) defaultMl = vs[0].ml;   // "All figures are based on one quart"
-        if (derive && /\bdouble\b/i.test(sen) && /\b(cloudy|murky|turbid)\b/i.test(sen)) doubles.push(agent);
-        continue;
-      }
-      // Each dose owns the part of the sentence up to the last , ; ( or "or" / "and" before the next dose.
-      const cut = ds.map((d, k) => { if (k === ds.length - 1) return sen.length;
-        const from = d.index + d[0].length, gap = sen.slice(from, ds[k + 1].index);
-        const ms = [...gap.matchAll(/[,;(]|\s(?:or|and|but)\s|\s-\s/g)]; return ms.length ? from + ms.at(-1).index : ds[k + 1].index; });
-      ds.forEach((d, k) => {
-        const s0 = k ? cut[k - 1] : 0, s1 = cut[k], seg = sen.slice(s0, s1), dEnd = d.index + d[0].length;
-        let v = vs.find(v => v.i >= dEnd && v.end <= s1 && v.i - dEnd <= 60), label;
-        if (v) label = sen.slice(d.index, v.end);
-        else { v = vs.filter(v => v.i >= s0 && v.end <= d.index).at(-1); label = v ? `${d[0]} (${v.t})` : d[0]; }
-        const states = header && ds.length >= 2 && header[k] ? new Set([header[k]]) : statesIn(seg);
-        const ag = agentIn(seg) || agent, pct = pctIn(seg) || (tab && pctIn(sen)) || (ag && pctBy[ag]) || null;
-        let ml = v ? v.ml : null;
-        if (ml == null && !derive) ml = lastMl;                                    // answer: "5 drops per quart. If cloudy, use 10 drops"
-        if (v) lastMl = v.ml;
-        for (const am of [d[1], d[2]].filter(Boolean))
-          pf.push({amount: amount(am), unit: doseUnit(d[3]), ml, states, pct, agent: ag, label: label.trim()});
-      });
-    }
-    for (const f of pf) if (f.ml == null && defaultMl != null) f.ml = defaultMl;
-    for (const ag of doubles) for (const f of pf.slice())
-      if ((!f.states.size || f.states.has("clear")) && (!ag || !f.agent || f.agent === ag))
-        pf.push({...f, amount: f.amount * 2, states: new Set(["cloudy"]), label: f.label + " doubled for cloudy water"});
-    facts.push(...pf);
-  }
-  return facts;
-}
-const sameMl = (a, b) => a / b > 0.85 && a / b < 1.18;              // 1 quart ~ 1 litre, 1/2 gallon ~ 2 litres
-export function doseGrounded(claim, facts){
-  const cs = claim.states.size ? claim.states : new Set(["clear"]);
-  return facts.some(f => Math.abs(f.amount - claim.amount) < 1e-6 && f.unit === claim.unit
-    && (claim.ml == null || (f.ml != null && sameMl(claim.ml, f.ml)))
-    && [...cs].every(s => (f.states.size ? f.states : new Set(["clear"])).has(s))
-    && (!claim.pct || !f.pct || (claim.pct[0] <= f.pct[1] && claim.pct[1] >= f.pct[0]))
-    && (!claim.agent || !f.agent || claim.agent === f.agent));
-}
+// Doses (drops, teaspoons, tablespoons, tablets) are read as facts by www/docs/dose.js (amount + unit + volume of
+// water + water state + strength + agent), the same code the Ask the Manuals page uses to remove a dose the sources
+// do not give. Other quantities (minutes, hours, %, litres of storage...) must appear in a source with the same unit.
+export {doseFacts, doseGrounded} from "../www/docs/dose.js";
 const UNITS = {ml: "ml|mls|millilit\\w*", litre: "lit(?:re|er)s?|l\\b", minute: "minutes?|mins?\\b", hour: "hours?|hrs?\\b",
   second: "seconds?|secs?\\b", pct: "%|per ?cent", mg: "mg\\b|milligrams?", mcg: "mcg\\b|micrograms?", ppm: "ppm\\b", gallon: "gallons?",
   quart: "quarts?", ounce: "ounces?|oz\\b", cup: "cups?\\b", degree: "degrees|°", metre: "metres?|meters?|m\\b"};
@@ -233,11 +160,9 @@ const NUM = "\\d+(?:[.,]\\d+)?";
 const QTY = new RegExp(`(?<![\\d.,/])(${NUM})(?:\\s*(?:-|–|to)\\s*(${NUM}))?\\s*(${Object.values(UNITS).join("|")})`, "gi");
 const unitOf = u => Object.values(UNITS).find(p => new RegExp(`^(?:${p})$`, "i").test(u));
 export function ungroundedNumbers(answer, sources){
-  const srcs = (Array.isArray(sources) ? sources : [sources]), norm = srcs.map(normText), out = [];
-  const facts = srcs.flatMap(s => doseFacts(s, {derive: true}));
-  for (const c of doseFacts(answer)) if (!doseGrounded(c, facts))
-    out.push(c.label + ([...c.states].length ? ` [${[...c.states].join(", ")} water]` : "") + (c.pct ? ` [${c.pct[0] === c.pct[1] ? c.pct[0] : c.pct.join("-")}%]` : ""));
-  for (const m of normText(answer).matchAll(QTY)){
+  const srcs = (Array.isArray(sources) ? sources : [sources]), norm = srcs.map(D.normText);
+  const out = D.ungroundedDoses(answer, srcs).map(D.describeDose);
+  for (const m of D.normText(answer).matchAll(QTY)){
     const unit = unitOf(m[3]) || m[3];
     for (const raw of [m[1], m[2]].filter(Boolean)){
       const n = raw.replace(/[.,]/, "[.,]"), num = `(?<![\\d.,])${n}(?![\\d])`;
@@ -248,15 +173,17 @@ export function ungroundedNumbers(answer, sources){
   return [...new Set(out)];
 }
 
-// Score one answer. ctx: {mode, hits (rag sources), finish}. Returns [{check, ok, detail}].
-export function scoreAnswer(c, answer, {mode = c.mode, hits = [], finish = "stop"} = {}){
+// Score one answer. ctx: {mode, hits (rag sources), exact (the excerpts shown word for word), shown (the answer as the
+// page shows it; rag default: computed here with the page's guards), finish}. Returns [{check, ok, detail}].
+export function scoreAnswer(c, answer, {mode = c.mode, hits = [], exact = [], shown, finish = "stop"} = {}){
   answer = normApos(answer);                       // models often write Don’t / can’t (U+2019)
+  shown = normApos(shown ?? (mode === "rag" ? shownAnswer(answer, hits, exact).text : answer));
   const res = [], add = (check, ok, detail = "") => res.push(ok ? {check, ok} : {check, ok, detail});
   add("answered", !!answer.trim() && finish !== "length" && !/<\/?think>/i.test(answer),
     !answer.trim() ? "empty answer" : finish === "length" ? "cut off at max_tokens" : /<\/?think>/i.test(answer) ? "leaked <think>" : "");
   for (const g of c.require || []){
     const alts = Array.isArray(g) ? g : [g];
-    add("require", alts.some(p => rx(p).test(answer)), "none of: " + alts.join(" | "));
+    add("require", alts.some(p => rx(p).test(shown)), "none of: " + alts.join(" | ") + (shown !== answer ? " (in the answer as shown)" : ""));
   }
   if (c.forbid?.length){ const h = forbiddenHits(answer, c.forbid); add("forbid", !h.length, h.join("; ")); }
   for (const p of c.forbid_raw || []){ const m = rx(p).exec(answer); add("forbid_raw", !m, m ? `"${m[0]}"` : ""); }
@@ -267,6 +194,7 @@ export function scoreAnswer(c, answer, {mode = c.mode, hits = [], finish = "stop
       !cs.length ? "no [n] citation" : `cites missing source(s) ${[...new Set(bad)].join(", ")} of ${hits.length}`);
     if (c.cite_from) add("cite_from", cs.some(n => hits[n - 1] && rx(c.cite_from).test(hits[n - 1].f)),
       `no citation of a source matching /${c.cite_from}/`);
+    if (c.exact) res.push(...scoreExact(c, exact));
     if (c.grounded !== false){
       const u = ungroundedNumbers(answer, hits.map(h => h.t));
       add("grounded", !u.length, "not in any source: " + u.join(", "));
@@ -274,13 +202,21 @@ export function scoreAnswer(c, answer, {mode = c.mode, hits = [], finish = "stop
   }
   return res;
 }
+// The exact box: shown, and every group of c.exact matches its text (the source's own wording, never the model's).
+export function scoreExact(c, exact){
+  if (!c.exact) return [];
+  const t = exactText(exact);
+  if (!t) return [{check: "exact", ok: false, detail: "no 'From the sources (exact wording)' box"}];
+  return c.exact.map(g => { const alts = Array.isArray(g) ? g : [g], ok = alts.some(p => rx(p).test(t));
+    return ok ? {check: "exact", ok} : {check: "exact", ok, detail: "box lacks: " + alts.join(" | ")}; });
+}
 export function scoreRetrieval(c, hits){
   return (c.retrieve || []).map(p => ({check: "retrieval", ok: hits.some(h => rx(p).test(h.f)),
     detail: `no source matching /${p}/ in: ${[...new Set(hits.map(h => h.f))].join(", ") || "(none)"}`}));
 }
 
 // Every case is well formed: unique ids, known keys and modes, patterns compile.
-const KEYS = new Set(["id", "mode", "topic", "question", "history", "why", "retrieve", "require", "forbid", "forbid_raw", "abstain", "cite_from", "grounded"]);
+const KEYS = new Set(["id", "mode", "topic", "question", "history", "why", "retrieve", "require", "forbid", "forbid_raw", "abstain", "cite_from", "grounded", "exact"]);
 export function validateCases(cases){
   const errs = [], ids = new Set();
   if (!Array.isArray(cases) || !cases.length) return ["no cases"];
@@ -292,10 +228,11 @@ export function validateCases(cases){
     if (typeof c.question !== "string" || !c.question.trim()) errs.push(`${id}: no question`);
     if (c.topic != null && !/^[a-z0-9-]+$/.test(c.topic)) errs.push(`${id}: topic must be [a-z0-9-]`);
     for (const k of Object.keys(c)) if (!KEYS.has(k)) errs.push(`${id}: unknown key ${k}`);
-    if (c.mode === "chat" && (c.retrieve || c.cite_from)) errs.push(`${id}: retrieve / cite_from are for rag cases`);
+    if (c.mode === "chat" && (c.retrieve || c.cite_from || c.exact)) errs.push(`${id}: retrieve / cite_from / exact are for rag cases`);
+    if (c.exact && !R.quantityQuestion(c.question)) errs.push(`${id}: exact needs an amount question (the page shows no exact box)`);
     if (c.history && (!Array.isArray(c.history) || c.history.some(m => !["user", "assistant"].includes(m.role) || typeof m.content !== "string")))
       errs.push(`${id}: history must be [{role: user|assistant, content}]`);
-    const pats = [...(c.require || []).flat(), ...(c.forbid || []), ...(c.forbid_raw || []), ...(c.retrieve || []), ...(c.cite_from ? [c.cite_from] : [])];
+    const pats = [...(c.require || []).flat(), ...(c.exact || []).flat(), ...(c.forbid || []), ...(c.forbid_raw || []), ...(c.retrieve || []), ...(c.cite_from ? [c.cite_from] : [])];
     for (const p of pats) { try { rx(p); } catch (e) { errs.push(`${id}: bad pattern ${p}: ${e.message}`); } }
     if (!c.require?.length && !c.forbid?.length && !c.forbid_raw?.length && !c.abstain) errs.push(`${id}: no require / forbid / abstain check`);
   }
@@ -375,18 +312,27 @@ const where = c => typeof c.p === "number" ? `page ${c.p}` : `section "${c.p}"`;
 
 // One case's request, exactly as the page builds it.
 export function buildRequest(c, {ix, docs = {}, ctx = DEFAULT_CTX, temperature, seed} = {}){
-  let messages, hits = [], opts;
+  let messages, hits = [], exact = [], opts;
   if (c.mode === "rag"){
     hits = R.search(ix, c.question, {maxChars: R.sourceBudget(ctx, c.question)});
-    messages = R.buildMessages(c.question, hits, title(docs), where); opts = RAG;
+    exact = X.extractExact(ix, c.question, hits);                      // as rag.js: the excerpts shown word for word
+    messages = R.buildMessages(c.question, hits, title(docs), where, exact); opts = RAG;
   } else {
     messages = chat.messages([...(c.history || []), {role: "user", content: c.question}], chat.historyBudget(ctx)); opts = CHAT;
   }
   const body = {messages, ...opts};
   if (temperature != null) body.temperature = temperature;
   if (seed != null) body.seed = seed;
-  return {body, hits};
+  return {body, hits, exact};
 }
+// What the reader of Ask the Manuals sees: the exact box's text and the answer after the page's guards (rag.js
+// renderAnswer: doses without the source's conditions and figures not in the sources become "[amount removed]").
+export const REMOVED = "[amount removed]";
+export function shownAnswer(answer, hits, exact = []){
+  const g = X.guardAnswer(answer, X.allowedText(exact, hits));
+  return {text: g.text.replace(/\u0001/g, REMOVED), removed: g.removed, doses: g.doses};
+}
+export const exactText = exact => exact.flatMap(b => b.excerpts).join("\n");
 
 export async function runEval({cases, base = "http://127.0.0.1:8080", index, repeat = 3, ctx, temperature, seed,
                                retrievalOnly = false, timeout = 600, wait = 120, log = () => {}} = {}){
@@ -398,10 +344,10 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
   const useCtx = ctx || info.ctx || DEFAULT_CTX;
   const results = [];
   for (const c of cases){
-    const {body, hits} = buildRequest(c, {ix, docs, ctx: useCtx, temperature, seed});
-    const retrieval = c.mode === "rag" ? scoreRetrieval(c, hits) : [];
-    const r = {id: c.id, mode: c.mode, topic: c.topic || "other", question: c.question, why: c.why || "", retrieval,
-               sources: hits.map(h => `${docs[h.f] || h.f}, ${where(h)}`), runs: []};
+    const {body, hits, exact} = buildRequest(c, {ix, docs, ctx: useCtx, temperature, seed});
+    const retrieval = c.mode === "rag" ? scoreRetrieval(c, hits) : [], exactBox = scoreExact(c, exact);
+    const r = {id: c.id, mode: c.mode, topic: c.topic || "other", question: c.question, why: c.why || "", retrieval, exactBox,
+               sources: hits.map(h => `${docs[h.f] || h.f}, ${where(h)}`), exact: exact.map(b => ({n: b.n, excerpts: b.excerpts})), runs: []};
     if (!retrievalOnly) for (let i = 0; i < repeat; i++){
       const b = seed != null ? {...body, seed: seed + i} : body;
       let out;
@@ -410,15 +356,19 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
       else try { out = await complete(base, b, timeout); }
       catch (e) { out = {text: "", finish: "error", ms: 0, tokens: null, tps: null, error: String(e.message || e)}; }
       const text = c.mode === "rag" ? R.tidyAnswer(out.text) : out.text;
-      const checks = out.error ? [{check: "request", ok: false, detail: out.error}] : scoreAnswer(c, text, {hits, finish: out.finish});
-      r.runs.push({answer: text, finish: out.finish, ms: out.ms, tokens: out.tokens, tps: out.tps, checks, pass: checks.every(x => x.ok)});
+      const sh = c.mode === "rag" && !out.error ? shownAnswer(text, hits, exact) : {text, removed: 0, doses: []};
+      const checks = out.error ? [{check: "request", ok: false, detail: out.error}] : scoreAnswer(c, text, {hits, exact, shown: sh.text, finish: out.finish});
+      // with the exact box shown the model was told to write no figure at all: count the ones it wrote anyway
+      const figs = exact.length && out.finish !== "no-sources" ? X.figures(text).length : 0;
+      r.runs.push({answer: text, shown: sh.text !== text ? sh.text : undefined, removed: sh.removed, removedDoses: sh.doses, figuresDespiteExact: figs,
+                   finish: out.finish, ms: out.ms, tokens: out.tokens, tps: out.tps, checks, pass: checks.every(x => x.ok)});
       log(`${r.runs.at(-1).pass ? "pass" : "FAIL"} ${c.id} #${i + 1}${out.ms ? ` (${(out.ms / 1000).toFixed(1)} s)` : ""}` +
           (r.runs.at(-1).pass ? "" : ": " + checks.filter(x => !x.ok).map(x => `${x.check}: ${x.detail}`).join("; ")));
     }
     r.passed = r.runs.filter(x => x.pass).length;
-    r.retrievalOk = retrieval.every(x => x.ok);
-    if (retrievalOnly || !r.runs.length) log(`${r.retrievalOk ? "pass" : "FAIL"} ${c.id} retrieval` +
-      (r.retrievalOk ? "" : ": " + retrieval.filter(x => !x.ok).map(x => x.detail).join("; ")));
+    r.retrievalOk = retrieval.every(x => x.ok); r.exactOk = exactBox.every(x => x.ok);
+    if (retrievalOnly || !r.runs.length){ const bad = [...retrieval, ...exactBox].filter(x => !x.ok);
+      log(`${!bad.length ? "pass" : "FAIL"} ${c.id} retrieval${exactBox.length ? " + exact box" : ""}` + (bad.length ? ": " + bad.map(x => x.detail).join("; ") : "")); }
     results.push(r);
   }
   return summarise(results, {base, model: info.model, ctx: useCtx, repeat: retrievalOnly ? 0 : repeat, temperature, seed, retrievalOnly});
@@ -426,6 +376,7 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
 
 export function summarise(results, meta){
   const runs = results.flatMap(r => r.runs), ret = results.filter(r => r.mode === "rag" && r.retrieval.length);
+  const box = results.filter(r => r.exactBox?.length), guarded = runs.filter(x => x.removed);
   const failsByCheck = {};
   for (const x of runs) for (const ch of x.checks) if (!ch.ok) failsByCheck[ch.check] = (failsByCheck[ch.check] || 0) + 1;
   const timed = runs.filter(x => x.ms), byTopic = {};
@@ -440,6 +391,9 @@ export function summarise(results, meta){
       flaky: results.filter(r => r.passed > 0 && r.passed < r.runs.length).length,
       failing: results.filter(r => r.runs.length && r.passed === 0).length,
       retrieval: ret.length ? {cases: ret.length, ok: ret.filter(r => r.retrievalOk).length} : null,
+      exactBox: box.length ? {cases: box.length, ok: box.filter(r => r.exactOk).length} : null,
+      guard: {runs: guarded.length, removed: guarded.reduce((n, x) => n + x.removed, 0),
+              figuresDespiteExact: runs.filter(x => x.figuresDespiteExact).length},
       failsByCheck, byTopic,
       medianSeconds: timed.length ? +(timed.map(x => x.ms).sort((a, b) => a - b)[timed.length >> 1] / 1000).toFixed(1) : null,
     },
@@ -455,13 +409,18 @@ export function markdown(rep){
   if (!m.retrievalOnly) L.push(`**Pass rate ${pct(s.passRate)}** (${s.passed}/${s.runs} runs) · reliable ${s.reliable} · flaky ${s.flaky} · failing ${s.failing} of ${m.cases} cases` +
     (s.medianSeconds != null ? ` · median ${s.medianSeconds} s per answer` : ""), "");
   if (s.retrieval) L.push(`Retrieval: ${s.retrieval.ok}/${s.retrieval.cases} manuals cases found the sources they need.`, "");
+  if (s.exactBox) L.push(`Exact box: ${s.exactBox.ok}/${s.exactBox.cases} amount cases show the source amounts they need word for word.`, "");
+  if (!m.retrievalOnly && s.guard && (s.guard.runs || s.guard.figuresDespiteExact)) L.push(`Page guard: removed ${s.guard.removed} amount(s) in ${s.guard.runs} run(s)` +
+    ` (the reader saw "[amount removed]"); the model wrote figures despite the exact box in ${s.guard.figuresDespiteExact} run(s).`, "");
   if (!m.retrievalOnly && s.runs) L.push("By topic: " + Object.entries(s.byTopic).map(([k, v]) => `${k} ${v.passed}/${v.runs}`).join(" · "), "");
   if (Object.keys(s.failsByCheck).length) L.push("Failed checks: " + Object.entries(s.failsByCheck).map(([k, v]) => `${k} ${v}`).join(", "), "");
-  L.push("| Case | Mode | Runs passed | Retrieval | First failure |", "|---|---|---|---|---|");
+  L.push("| Case | Mode | Runs passed | Retrieval | Exact box | First failure |", "|---|---|---|---|---|---|");
   for (const r of rep.results){
     const f = r.runs.find(x => !x.pass), fc = f?.checks.find(x => !x.ok);
+    const pre = [...r.retrieval, ...(r.exactBox || [])].find(x => !x.ok);
     L.push(`| ${r.id} | ${r.mode} | ${r.runs.length ? `${r.passed}/${r.runs.length}` : "-"} | ${r.mode === "rag" && r.retrieval.length ? (r.retrievalOk ? "ok" : "**missed**") : "-"} | ${
-      fc ? `${fc.check}: ${fc.detail}`.replace(/\|/g, "\\|").replace(/\n/g, " ").slice(0, 160) : (!r.retrievalOk ? r.retrieval.find(x => !x.ok).detail.replace(/\|/g, "\\|").slice(0, 160) : "")} |`);
+      r.exactBox?.length ? (r.exactOk ? "ok" : "**missing**") : "-"} | ${
+      fc ? `${fc.check}: ${fc.detail}`.replace(/\|/g, "\\|").replace(/\n/g, " ").slice(0, 160) : (pre ? pre.detail.replace(/\|/g, "\\|").slice(0, 160) : "")} |`);
   }
   const bad = rep.results.filter(r => r.runs.some(x => !x.pass));
   if (bad.length) L.push("", "## Failing answers", "");
@@ -469,7 +428,8 @@ export function markdown(rep){
     const f = r.runs.find(x => !x.pass);
     L.push(`### ${r.id}`, "", `**Q:** ${r.question}`, "", ...(r.why ? [`*Why:* ${r.why}`, ""] : []),
       ...f.checks.filter(x => !x.ok).map(x => `- **${x.check}**: ${x.detail}`), "",
-      "```text", (f.answer || "(no answer)").slice(0, 2000).replace(/```/g, "'''"), "```", "");
+      "```text", (f.answer || "(no answer)").slice(0, 2000).replace(/```/g, "'''"), "```", "",
+      ...(f.shown ? ["As shown on the page (after its amount guards):", "", "```text", f.shown.slice(0, 2000).replace(/```/g, "'''"), "```", ""] : []));
   }
   return L.join("\n") + "\n";
 }
@@ -487,7 +447,7 @@ function parseArgs(argv){
 }
 async function main(){
   const a = parseArgs(process.argv.slice(2));
-  if (a.help){ console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").filter(l => l.startsWith("//")).slice(1, 32).map(l => l.slice(3)).join("\n")); return 0; }
+  if (a.help){ console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1).join("\n").split(/\n(?!\/\/)/)[0].split("\n").slice(1).map(l => l.slice(3)).join("\n")); return 0; }
   const known = new Set(["base", "cases", "index", "mode", "topic", "only", "ctx", "temperature", "seed", "out", "min-pass", "timeout", "wait", "repeat", "retrieval-only", "list", "help"]);
   for (const k of Object.keys(a)) if (!known.has(k)) throw new Error("unknown option --" + k);
   let cases = JSON.parse(fs.readFileSync(a.cases || path.join(ROOT, "tools/llm-eval-cases.json"), "utf8"));
@@ -518,7 +478,8 @@ async function main(){
   console.log(md.split("\n## Failing answers")[0]);
   console.log(`report: ${path.join(out, "report.md")} (all answers: report.json)`);
   const min = num("min-pass", 1);
-  if (rep.meta.retrievalOnly) return rep.summary.retrieval && rep.summary.retrieval.ok < rep.summary.retrieval.cases ? 1 : 0;
+  if (rep.meta.retrievalOnly){ const {retrieval: rt, exactBox: eb} = rep.summary;
+    return (rt && rt.ok < rt.cases) || (eb && eb.ok < eb.cases) ? 1 : 0; }
   return rep.summary.passRate < min ? 1 : 0;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)){
