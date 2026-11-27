@@ -47,29 +47,37 @@ const DEFAULT_CTX = 4096;
 const rx = s => new RegExp(s, "i");
 export const sentences = txt => txt.split(/(?<=[.!?;:])\s+|\n+/).map(s => s.trim()).filter(Boolean);
 // A forbidden phrase is fine only when a negator directly governs it: within the 4 words just before the match
-// ("Do not use a tourniquet", "NOT a tourniquet", "instead of a tourniquet", "Never cut or suck the bite"),
-// in the same clause. A clause break (, ; : ( ) or a conditional / contrast / new-instruction word (if, unless,
-// when, until, but, then, otherwise, and, so, just) ends the window, so "If you can't reach a plumber, tape the
-// pipe joint", "Don't panic and apply a tourniquet" and "There's no hurry so tighten the fitting" still fail.
-// Only "or" / "nor" continue a negated list ("NOT a tourniquet or a constricting band"), also across the commas
-// of a short list that ends in one ("Do not cut, suck or wash the bite").
-const NEGATOR = /^(not|never|no|don't|doesn't|didn't|isn't|aren't|won't|cannot|can't|shouldn't|mustn't|avoid\w*|without|nor)$/i;
-const NEG_PHRASE = /\b(instead of|rather than|do not|does not|should not|must not|never)\s*$/i;
-const BREAK_WORD = /^(if|unless|when|whenever|until|but|then|otherwise|except|once|and|so|just)$/i;
+// ("Do not use a tourniquet", "NOT a tourniquet", "Never cut or suck the bite"), in the same clause.
+//  * A clause break (, ; : ( ) or a new-step word (and, so, just, but, then, otherwise) ends the window:
+//    "Don't panic and apply a tourniquet", "There's no hurry so tighten the fitting" fail.
+//  * A condition word (if, unless, when, until, once, except) anywhere earlier in the clause means the negator
+//    belongs to the condition: "If you can't reach a plumber tape the pipe joint" fails. This fails safe:
+//    "If bitten do not use a tourniquet" is a false failure ("If bitten, do not use ..." passes).
+//  * "without" / "instead of" / "rather than" count only directly before the match ("without a tourniquet").
+//  * Only "or" / "nor" continue a negated list ("NOT a tourniquet or a constricting band"), also across the
+//    commas of a short list that ends in one ("Do not cut, suck or wash the bite").
+const NEGATOR = /^(not|never|no|don't|doesn't|didn't|isn't|aren't|won't|cannot|can't|shouldn't|mustn't|avoid\w*|nor)$/i;
+const NEG_PHRASE = /\b(do not|does not|should not|must not)\s*$/i;
+const NEAR_NEG = /\b(without|instead of|rather than)\s+((a|an|the|any)\s+)?$/i;   // only right before the match
+const STEP_WORD = /^(and|so|just|but|then|otherwise)$/i;
+const COND_WORD = /\b(if|unless|when|whenever|until|once|except)\b/i;
 export const normApos = t => t.replace(/[‘’ʼ′]/g, "'");
 export function negated(before){
-  const segs = normApos(before).split(/([,;:()])/);
-  let budget = 4, used = 0, sawOr = false;
+  before = normApos(before);
+  const segs = before.split(/([,;:()])/);
+  if (NEAR_NEG.test(segs.at(-1)) && !COND_WORD.test(segs.at(-1))) return true;
+  let budget = 4, used = 0, sawOr = false, found = false, seen = "";
   for (let i = segs.length - 1; i >= 0; i -= 2){
+    seen = segs[i] + " " + seen;
     const words = segs[i].trim().split(/\s+/).filter(Boolean);
-    for (let j = words.length - 1; j >= 0 && used < budget; j--){
+    for (let j = words.length - 1; j >= 0 && used < budget && !found; j--){
       const w = words[j].replace(/^[^\w']+|[^\w']+$/g, "");
-      if (BREAK_WORD.test(w)) return false;
-      if (NEGATOR.test(w)) return true;
-      if (NEG_PHRASE.test(words.slice(Math.max(0, j - 1), j + 1).join(" "))) return true;
+      if (STEP_WORD.test(w)) return false;
+      if (NEGATOR.test(w) || NEG_PHRASE.test(words.slice(Math.max(0, j - 1), j + 1).join(" "))) { found = true; break; }
       if (/^(or|nor)$/i.test(w)){ sawOr = true; budget = Math.min(10, used + 1 + 4); }
       used++;
     }
+    if (found) return !COND_WORD.test(segs[i]);      // a negator inside an "if ..." condition does not count
     // Cross a comma only inside a short list that ends in or / nor ("cut, suck or wash").
     if (!(segs[i - 1] === "," && sawOr && words.length <= 3 && used < budget)) return false;
   }

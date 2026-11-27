@@ -277,9 +277,10 @@ All checks are plain rules, not another AI grading the answer, so a score means 
 * `require` / `forbid`: required facts (pressure immobilisation for snake bite, vinegar for box jellyfish,
   000) and forbidden advice (a tourniquet, vinegar on a bluebottle, a pressure bandage on a redback bite).
   A forbidden phrase does not count only when a negator governs it: within the 4 words just before it, in the
-  same clause ("do **not** use a tourniquet", "NOT a tourniquet or a constricting band"). A comma, colon or
-  "if / unless / when / but / and / so" ends that window, so "If you can't reach a plumber, tape the pipe
-  joint" and "Don't panic and apply a tourniquet" fail. Curly apostrophes (Don’t) count as straight ones.
+  same clause ("do **not** use a tourniquet", "NOT a tourniquet or a constricting band"). A comma, colon or a
+  new step ("and / so / but / then") ends that window, and a negator inside an "if / unless / when" condition
+  never counts. So "If you can't reach a plumber tape the pipe joint" and "Don't panic and apply a tourniquet"
+  fail. "Without" counts only right before the phrase. Curly apostrophes (Don’t) count as straight ones.
 * `abstain`: says the sources or manuals do not cover it, or declines ("I can't give doses"). A bare "no" or
   "don't" is not enough.
 * Ask the Manuals: every answer cites at least one `[n]`, and only sources that were really sent.
