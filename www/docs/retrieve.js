@@ -35,10 +35,113 @@ export function queryTerms(q){
   const base = [...new Set(tok(q))], w = new Map(base.map(t => [t, 1]));
   const add = t => { t = stem(t); if (!w.has(t)) w.set(t, EXPAND_WEIGHT); };
   for (const t of base) for (const x of EXPAND[t] || []) add(x);
-  const wantsSafeWater = w.has("water") && base.some(t => ["safe", "drink", "clean", "purif", "treat", "disinfect", "potable", "contamin", "steril"].some(p => t.startsWith(p)));
-  if (wantsSafeWater) WATER_SAFETY.forEach(add);
+  if (safeWaterTerms(base)) WATER_SAFETY.forEach(add);
   return w;
 }
+const safeWaterTerms = base => base.includes("water") && base.some(t => ["safe", "drink", "clean", "purif", "treat", "disinfect", "potable", "contamin", "steril"].some(p => t.startsWith(p)));
+// "Make water safe / drinkable / clean" and the like: a question whose answer is a dose (exact.js shows it verbatim).
+export const wantsSafeWater = q => safeWaterTerms([...new Set(tok(q))]);
+
+// ---- figures: a number with a unit (exact.js shows them verbatim; amount questions favour passages that have them)
+const NUMW = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter";
+// mixed numbers first ("1 1/2", "1½"), then decimals and fractions, unicode fractions, number words
+const N1 = `(?:\\d+\\s+\\d+\\s*\\/\\s*\\d+|\\d+\\s*[½¼¾⅓⅔⅛]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?|[½¼¾⅓⅔⅛]|\\b(?:${NUMW})\\b)`;
+// not inside a word, a decimal or a fraction ("4" in "1/4", "21" in "12/20/2013"); "/2 liters" after a unit is fine
+const NUM = `(?<![\\w.])(?<!\\d\\s?\\/\\s?)${N1}(?:\\s*(?:-|–|to)\\s*${N1})?`;
+const UNIT = "(?:drops?|gtts?|gts|tsp|teaspoon(?:ful)?s?|tbsp|tablespoon(?:ful)?s?|ml|mls|millilit(?:re|er)s?|mg|milligrams?|" +
+  "lit(?:re|er)s?|l|quarts?|qts?|gallons?|gal|pints?|cups?|fl\\.?\\s*oz|ounces?|oz|tablets?|tabs?|ppm|per\\s?cent|percent|%|" +
+  "minutes?|mins?|hours?|hrs?|seconds?|secs?|°\\s*[cf]|degrees(?:\\s+(?:celsius|fahrenheit|c|f))?)(?![a-z])";
+const ADJ = "(?:(?:full|whole|level|heaped|heaping)\\s+)?";
+const SEP = "(?:\\/|\\bper\\b|\\bfor\\s+(?:each|every)\\b|\\bto\\b|\\bin\\b|\\bof\\s+[a-z]+(?:\\s+[a-z]+)?\\s+(?:per|to|in|for\\s+(?:each|every))\\b)";
+// A figure: a number with a unit, with an optional "per gallon" / "/30 MIN" / "of bleach per litre" part.
+export const FIGURE_SRC = `(?<n>${NUM})\\s*(?:-\\s*)?${ADJ}(?:a\\s+)?(?<u>${UNIT})` +
+  `(?:\\s*(?<sep>${SEP})\\s*(?:(?<n2>(?:a|an|each|every)\\b|${N1})\\s*(?:-\\s*)?)?${ADJ}(?<u2>${UNIT}))?`;
+export const figures = s => [...String(s).matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => m[0]);
+
+// The same figure however it is written: number words or digits ("one full minute" = "1 minute"), "%" / "percent",
+// units singular, plural or abbreviated (gtts = drops, tsp = teaspoon, L = litre), "5.25% to 8.25%" = "5.25-8.25 percent".
+const WORDS = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  fifteen: 15, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, ninety: 90, hundred: 100, half: 0.5, quarter: 0.25,
+  a: 1, an: 1, each: 1, every: 1, "½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": 0.125};
+function num(x){
+  x = x.trim().toLowerCase(); if (x in WORDS) return WORDS[x];
+  let w = x.match(/^(\d+)\s+(\d+)\s*\/\s*(\d+)$/); if (w) return +w[1] + +w[2] / +w[3];           // 1 1/2
+  w = x.match(/^(\d+)\s*([½¼¾⅓⅔⅛])$/); if (w) return +w[1] + WORDS[w[2]];                          // 1½
+  let m = x.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+)$/); if (m) return +m[1] / +m[2];
+  if (/^\d{1,3},\d{3}$/.test(x)) return +x.replace(",", "");
+  return +x.replace(",", ".");
+}
+const UNITS = [[/^(drops?|gtts?|gts)$/, "drop"], [/^(tsp|teaspoon)/, "tsp"], [/^(tbsp|tablespoon)/, "tbsp"], [/^(ml|mls|millilit)/, "ml"],
+  [/^(mg|milligram)/, "mg"], [/^(l|lit(re|er)s?)$/, "l"], [/^(quart|qt)/, "quart"], [/^(gallon|gal)/, "gallon"], [/^pint/, "pint"], [/^cup/, "cup"],
+  [/^(fl\.?oz|ounce|oz)/, "oz"], [/^tab/, "tablet"], [/^ppm$/, "ppm"], [/^(%|percent)$/, "%"], [/^min/, "min"], [/^(hour|hr)/, "h"],
+  [/^sec/, "s"], [/^(°c|degreesc|degreescelsius)$/, "°c"], [/^(°f|degreesf|degreesfahrenheit)$/, "°f"], [/^degree/, "deg"]];
+const unit = u => { u = u.toLowerCase().replace(/\s+/g, ""); for (const [re, c] of UNITS) if (re.test(u)) return c; return u; };
+const k = n => String(Math.round(n * 10000) / 10000);
+const VOLUME = new Set(["quart", "gallon", "l", "pint", "cup"]);   // water volumes in a dosing table (not ml: doses are given in ml)
+export const TIME_UNITS = new Set(["min", "h", "s", "°c", "°f", "deg"]);
+// {nums: [n] or [a, b], u, tail: [n, unit] or null}
+export function parseFigure(g){
+  const nums = g.n.split(/\s*(?:-|–|\bto\b)\s*/i).filter(Boolean).map(num), u = unit(g.u);
+  if (!g.u2) return {nums, u, tail: null};
+  const n2 = g.n2 ? num(g.n2) : 1, u2 = unit(g.u2);
+  if (/^to$/i.test(g.sep.trim()) && u2 === u && nums.length === 1 && g.n2) return {nums: [nums[0], n2], u, tail: null};  // 5.25% to 8.25%
+  return {nums, u, tail: [n2, u2]};
+}
+const atom = (n, u) => `${k(n)} ${u}`;
+function figuresIn(text){
+  const atoms = new Set(), ranges = new Set(), compounds = new Set(), rows = [], adjacent = new Set();
+  for (const line of String(text).split("\n")){
+    const byUnit = new Map(), add = (n, u) => { const a = atom(n, u); atoms.add(a); (byUnit.get(u) || byUnit.set(u, new Set()).get(u)).add(a); };
+    const ms = [...line.matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => {
+      const f = parseFigure(m.groups), head = f.nums.map(n => atom(n, f.u)), key = head.join("-");
+      f.nums.forEach(n => add(n, f.u));
+      if (f.nums.length === 2) ranges.add(key);
+      const parts = [...head];
+      if (f.tail){ const t = atom(...f.tail); add(...f.tail); compounds.add(key + " / " + t); parts.push(t); }
+      return {key, parts, u: f.u, start: m.index, end: m.index + m[0].length};
+    });
+    // A table row, also when the table is flattened to one line: the amount right after its volume, nothing but spaces
+    // or "/" between ("1 quart/1 liter 5 drops", "1 gallon 1/4 teaspoon"). Only for a table laid out volume first: the
+    // run of figures (joined by spaces or "/") must start with a water volume. Then the amount (not a volume) pairs with
+    // the figure just before it and the figures joined to it by "/" ("1/2 gallon/2 quarts/2 liters 10 drops"), never one
+    // in the amount's own unit. An amount-first table ("8 drops 1 gallon 1/2 teaspoon 5 gallons") pairs nothing.
+    const joined = (a, b) => /^[\s\/]{0,3}$/.test(line.slice(a.end, b.start));
+    let runStart = 0;
+    ms.forEach((m, j) => {
+      if (j === 0 || !joined(ms[j - 1], m)) runStart = j;
+      if (!VOLUME.has(ms[runStart].u) || VOLUME.has(m.u)) return;
+      for (let i = j - 1, end = m.start; i >= runStart && ms[i].u !== m.u &&
+           (i === j - 1 ? /^[\s\/]{0,3}$/ : /^\s?\/\s?$/).test(line.slice(ms[i].end, end)); end = ms[i].start, i--)
+        for (const p of ms[i].parts) adjacent.add(m.key + " | " + p);
+    });
+    if (byUnit.size) rows.push(byUnit);
+  }
+  return {atoms, ranges, compounds, rows, adjacent};
+}
+let memo = ["", null];
+// Is this figure (a regexp match's groups) in the text, as the same number(s) and unit, however written? A "per" figure
+// ("5 drops per quart") counts if the source states it, or as a table row:
+//  * a line of the text (a real line break, not a sentence) whose only figure in each of the two units is that one; or
+//  * the amount directly after the volume figure(s), with only spaces or "/" between ("1 quart/1 liter 5 drops"), in a
+//    table laid out volume first. This also works on a table flattened to one line (PDFs added in the browser) without
+//    pairing figures from other rows; an amount-first table pairs nothing this way (safe: such figures are removed).
+export function figureInText(g, text){
+  if (memo[0] !== text) memo = [text, figuresIn(text)];
+  const F = memo[1], f = parseFigure(g), head = f.nums.map(n => atom(n, f.u));
+  const headOk = head.every(a => F.atoms.has(a)) || (head.length === 2 && F.ranges.has(head.join("-")));
+  if (!f.tail) return headOk;
+  const t = atom(...f.tail), key = head.join("-"), only = (row, u, want) => { const got = row.get(u); return !!got && got.size === want.length && want.every(a => got.has(a)); };
+  return F.compounds.has(key + " / " + t) || F.adjacent.has(key + " | " + t) ||
+    (f.u !== f.tail[1] && F.rows.some(r => only(r, f.u, head) && only(r, f.tail[1], [t])));
+}
+// How many dose figures (not times or temperatures) a passage holds, for ranking amount questions.
+export const doseFigures = t => [...String(t).matchAll(new RegExp(FIGURE_SRC, "gi"))].filter(m => !TIME_UNITS.has(unit(m.groups.u))).length;
+
+const AMOUNT_Q = new RegExp("\\bhow\\s+(?:much|many|long|often|strong)\\b|\\b(?:dose|doses|dosage|dosing|amounts?|quantit(?:y|ies)|ratio|proportions?|" +
+  "dilut\\w*|strength|concentration|drops?|teaspoons?|tablespoons?|tsp|tbsp|ml|millilit\\w*|litres?|liters?|quarts?|gallons?|tablets?|" +
+  "ppm|percent|per\\s?cent|minutes?|hours?|temperature|degrees)\\b|%|°", "i");
+// A question about amounts: an amount word, or "make water safe to drink" (whose answer is a dose).
+export const quantityQuestion = q => AMOUNT_Q.test(q) || wantsSafeWater(q);
 
 export function createIndex(chunks){
   const df = new Map(); let total = 0;
@@ -48,12 +151,16 @@ export function createIndex(chunks){
   return {chunks, df, avgdl: total / Math.max(1, chunks.length)};
 }
 
-export function scoreAll(ix, q){
-  const qt = queryTerms(q), N = ix.chunks.length, k1 = 1.4, b = 0.75, scored = [];
+// For a question about amounts, a passage scores up to DOSE_BOOST_MAX x more for the dose figures it holds
+// (DOSE_BOOST each, at most DOSE_BOOST_CAP of them): the table with the drops ranks above the prose around it.
+export const DOSE_BOOST = 0.15, DOSE_BOOST_CAP = 8;
+export function scoreAll(ix, q, {figures: useFigures = true} = {}){
+  const qt = queryTerms(q), N = ix.chunks.length, k1 = 1.4, b = 0.75, scored = [], dose = useFigures && quantityQuestion(q);
   for (const c of ix.chunks){ let s = 0;
     for (const [t, wt] of qt){ const f = c.tf.get(t); if (!f) continue;
       const n = ix.df.get(t); const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
       s += wt * idf * f * (k1 + 1) / (f + k1 * (1 - b + b * c.len / ix.avgdl)); }
+    if (s > 0 && dose){ if (c.ndose === undefined) c.ndose = doseFigures(c.t); s *= 1 + DOSE_BOOST * Math.min(c.ndose, DOSE_BOOST_CAP); }
     if (s > 0) scored.push([s * (c.boost || 1), c]); }
   return scored.sort((a, b) => b[0] - a[0]);
 }
@@ -112,23 +219,37 @@ export function search(ix, q, {k = 6, maxPerPage = 2, maxChars = 9000} = {}){
   return picked;
 }
 
-export const SYSTEM_PROMPT = [
-  "You are an offline survival and emergency reference assistant.",
-  "Answer ONLY the question asked, using ONLY the numbered sources provided. Do not add facts, tips, warnings or topics that the question did not ask about, even if a source mentions them.",
-  "Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly instead of answering from memory.",
-  "Numbers: give every dose, amount or time exactly as its source states it, together with the conditions the source attaches to it (product strength or percentage, amount of water, clear, cloudy or cold water, waiting time, and purpose such as treatment or storage), with its citation.",
-  "Never combine, average or convert figures from different sources, tables or table rows. If sources give different figures, list each one separately with its own citation. If you are not sure which row of a table applies, quote the rows as written.",
-  "After any dose or amount, add a short caution to check it against the cited page. If no source states an amount, say that the sources give no amount; do not guess one.",
-  "Be practical and concise. Put citations inside sentences; do not end with a line of citations only.",
-  "The user is in Australia. If an Australian note and an older US manual disagree on the question asked, follow the Australian note and mention the difference. The Australian emergency number is 000.",
-  "Never state that a wild plant or mushroom is safe to eat.",
-].join(" ");
+const RULES = {
+  role: "You are an offline survival and emergency reference assistant.",
+  only: "Answer ONLY the question asked, using ONLY the numbered sources provided. Do not add facts, tips, warnings or topics that the question did not ask about, even if a source mentions them.",
+  cite: "Cite every claim with its source number in square brackets like [1] or [2][3]. If the sources do not contain the answer, say so plainly instead of answering from memory.",
+  numbers: "Numbers: give every dose, amount or time exactly as its source states it, together with the conditions the source attaches to it (product strength or percentage, amount of water, clear, cloudy or cold water, waiting time, and purpose such as treatment or storage), with its citation.",
+  noMix: "Never combine, average or convert figures from different sources, tables or table rows. If sources give different figures, list each one separately with its own citation. If you are not sure which row of a table applies, quote the rows as written.",
+  check: "After any dose or amount, add a short caution to check it against the cited page. If no source states an amount, say that the sources give no amount; do not guess one.",
+  style: "Be practical and concise. Put citations inside sentences; do not end with a line of citations only.",
+  au: "The user is in Australia. If an Australian note and an older US manual disagree on the question asked, follow the Australian note and mention the difference. The Australian emergency number is 000.",
+  food: "Never state that a wild plant or mushroom is safe to eat.",
+};
+export const SYSTEM_PROMPT = Object.values(RULES).join(" ");
+// When exact.js shows the source amounts word for word, the model must not write figures at all: a 4B model
+// paraphrasing a dosing table gets them wrong. It frames the answer and points to the sources instead.
+export const exactRule = ns => { const list = ns.map(n => `[${n}]`).join(" ");
+  return `Exact amounts: the passages of ${list} that hold the amounts are shown to the reader word for word. ` +
+  "So do NOT write any figure yourself: no numbers, doses, amounts, ratios, percentages, temperatures or times, in digits or in " +
+  "words, and never convert or combine them. Instead, briefly say which method each source describes, which " +
+  "source [n] gives its amounts, and in words what they depend on (product strength, amount of water, clear, cloudy or cold water, " +
+  `waiting time, treatment or storage), and tell the reader to use the exact wording shown. Only ${list} ` +
+  `${ns.length > 1 ? "have their" : "has its"} amounts shown: do not say that any other source gives amounts.`; };
+export const exactPrompt = ns => [RULES.role, RULES.only, RULES.cite, exactRule(ns), RULES.style, RULES.au, RULES.food].join(" ");
 
 // A final line or paragraph made only of citations ("[2]", "[1][2]") adds nothing: drop it.
 export const tidyAnswer = txt => txt.replace(/\s*\n[ \t]*(\[\d{1,3}\][ \t,]*)+\s*$/, "\n");
 
-export function buildMessages(q, hits, title, where){
+// exact: the excerpts exact.js shows word for word ([{n, ...}]); with any, the model is told not to write figures.
+export function buildMessages(q, hits, title, where, exact = []){
   const ctx = hits.map((c, i) => `[${i + 1}] ${title(c)}, ${where(c)}:\n${c.t}`).join("\n\n");
-  return [{role: "system", content: SYSTEM_PROMPT},
-          {role: "user", content: `Sources:\n${ctx}\n\nQuestion: ${q}\n\nAnswer only this question, from these sources, with citations.`}];
+  const ns = exact.map(b => b.n);
+  return [{role: "system", content: ns.length ? exactPrompt(ns) : SYSTEM_PROMPT},
+          {role: "user", content: `Sources:\n${ctx}\n\nQuestion: ${q}\n\nAnswer only this question, from these sources, with citations.` +
+            (ns.length ? " Do not write any amounts or times: they are shown to the reader word for word." : "")}];
 }

@@ -11,6 +11,10 @@
 //  * www/chat/chat.js: kit system prompt, history trimming, "New chat" drops an answer still streaming
 //  * www/ai-status.js: status re-checked (3 s until ready, then 30 s); context from models.json
 //  * prompts fit a 4096-token context: sources and chat history are sized from the AI's ctx
+//  * www/docs/exact.js: for amount questions the page shows the source passages holding the amounts word for
+//    word (on the real USMC p152 / WA DoH p2 index chunks, tests/fixtures/water-chunks.txt), each with its [n]
+//    link; the model is told not to write figures and invented figures are removed (the same figure written
+//    differently is kept); no blocks for other questions; amount questions rank passages with dose figures higher
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,6 +25,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const imp = rel => import(pathToFileURL(path.join(ROOT, rel)).href);
 const {renderMarkdown} = await imp("www/md.js");
 const R = await imp("www/docs/retrieve.js");
+const E = await imp("www/docs/exact.js");
 const chat = await imp("www/chat/chat.js");
 const AS = await imp("www/ai-status.js");
 let failed = 0;
@@ -233,6 +238,234 @@ await test("prompt: no snake-bite example; only the question; quantities quoted 
   assert.match(m[1].content, /^Sources:\n\[1\] /); assert.match(m[1].content, /Question: How do I make water safe to drink\?/);
 });
 
+// ---------------------------------------------------------------- exact amounts, word for word
+// The real index chunks of USMC p152 and WA DoH p2 (from a kit's index.js), with the notes, distractors and filler.
+const WATER = fs.readFileSync(path.join(ROOT, "tests/fixtures/water-chunks.txt"), "utf8").split(/^=== /m).slice(1).map(b => {
+  const nl = b.indexOf("\n"), m = b.slice(0, nl).match(/^(.*) page (\d+)$/); return {f: m[1], p: +m[2], t: b.slice(nl + 1).trim()}; });
+const all2 = [...all.filter(c => c.f === NOTES || c.f === "filler.pdf" || c.f.startsWith("Ready") || c.f.startsWith("FM21")), ...WATER].map(c => ({...c}));
+const ix2 = R.createIndex(all2);
+const QB = "How much bleach do I add to purify water?";
+const link = c => c.blob ? `${c.blob}#page=${c.p}` : c.u ? c.u : `pdf/${encodeURIComponent(c.f)}#page=${c.p}`;
+const title = c => c.f, where = c => typeof c.p === "number" ? `page ${c.p}` : `section "${c.p}"`;
+// The page section for one source: <figure>…</figure> whose caption links to that source's page.
+const figureOf = (html, f, p) => { const a = `href="${link({f, p})}" target="_blank" rel="noopener">[`;
+  const i = html.indexOf(a); return i < 0 ? "" : html.slice(html.lastIndexOf("<figure", i), html.indexOf("</figure>", i)); };
+const unesc = s => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+const WA_ROWS = " 1 quart/1 liter 5 drops\n 1/2 gallon/2 quarts/2 liters 10 drops\n 1 gallon 1/4 teaspoon\n 5 gallons 1 teaspoon\n 10 gallons 2 teaspoons";
+const USMC_ROWS = " PERCENT CLEAR WATER CLOUDY WATER COLD WATER\n 1% 10GTTS/30 MIN 20GTS/30 MIN 10GTTS/60MIN\n" +
+  " 4-6% 2GTTS/30 MIN 4GTTS/30 MIN 2GTTS/60 MIN\n 7-10% 1 GTTS/30 MIN 2GTTS/30 MIN 1 GTTS/60 MIN";
+// The answer the 4B model really gave for the water question (PR #14, small kit).
+const BAD = "Use household bleach (chlorine) as follows: For clear water: add 10 drops of bleach per gallon (or 5 drops per quart) [6]. " +
+  "For cloudy or cold water: filter the water first, then add 20 drops per gallon (or 10 drops per quart) [6]. " +
+  "Let the water stand for at least 60 minutes before drinking.";
+
+await test("exact: figures (number + unit) are found, with their 'per gallon' / '/30 MIN' part", () => {
+  assert.deepEqual(E.figures(" 1% 10GTTS/30 MIN 20GTS/30 MIN 10GTTS/60MIN"), ["1%", "10GTTS/30 MIN", "20GTS/30 MIN", "10GTTS/60MIN"]);
+  assert.deepEqual(E.figures(BAD), ["10 drops of bleach per gallon", "5 drops per quart", "20 drops per gallon", "10 drops per quart", "60 minutes"]);
+  assert.deepEqual(E.figures("between 5.25 percent and 8.25 percent; 5.25-8.25 percent; one full minute; 1/4 teaspoon; 2 tablets; 70 °C; 1 L"),
+    ["5.25 percent", "8.25 percent", "5.25-8.25 percent", "one full minute", "1/4 teaspoon", "2 tablets", "70 °C", "1 L"]);
+  assert.deepEqual(E.figures("Call 000. Page 2 of 2. (WMC.6.17d) DOH Pub 821-031, 12/20/2013 [6]. Step 1. Use a large pot"), []);
+});
+await test("exact: which questions are about amounts", () => {
+  for (const q of [Q, QB, "how many drops of iodine per litre?", "How long should I boil water?", "dose of bleach", "What ratio of bleach to water?",
+    "Is the creek water drinkable?"]) assert.ok(E.quantityQuestion(q), q);
+  for (const q of ["What should I do in a bushfire?", "snake bite first aid", "How do I treat a snake bite?", "How do I treat a boil on my arm?",
+    "How do I fix a car engine?", "Who wrote the field manual?"]) assert.ok(!E.quantityQuestion(q), q);
+});
+for (const [q, mc] of [[Q, 9000], [QB, 9000], [Q, R.sourceBudget(4096, Q)], [QB, R.sourceBudget(4096, QB)]]){
+  await test(`exact: "${q}" (${mc} chars of sources) shows the WA DoH and USMC amounts word for word with their [n] links`, () => {
+    const hits = R.search(ix2, q, {maxChars: mc}), ex = E.extractExact(ix2, q, hits);
+    const html = E.renderExact(ex, title, where, link);
+    assert.match(html, /^<h3>From the sources \(exact wording\)<\/h3>/);
+    const nWA = hits.findIndex(h => h.f.startsWith("WA-DoH") && h.p === 2) + 1, nUS = hits.findIndex(h => h.f.startsWith("USMC") && h.p === 152) + 1;
+    assert.ok(nWA > 0 && nUS > 0, "both pages retrieved: " + hits.map(h => `${h.f} ${h.p}`).join("; "));
+    const wa = figureOf(html, "WA-DoH-Purifying-Water-in-an-Emergency.pdf", 2), us = figureOf(html, "USMC-Wilderness-Medicine-Course.pdf", 152);
+    assert.ok(wa.includes(`#page=2" target="_blank" rel="noopener">[${nWA}]</a>`), "WA block cites its own source number " + nWA);
+    assert.ok(us.includes(`#page=152" target="_blank" rel="noopener">[${nUS}]</a>`), "USMC block cites its own source number " + nUS);
+    const waPre = unesc(wa), usPre = unesc(us);
+    // WA DoH p2: the treatment table with its conditions (bleach strength, wait), and the storage line on its own
+    assert.ok(waPre.includes(WA_ROWS), "WA table rows verbatim, line by line");
+    for (const s of ["Treating water with household bleach containing 5.25-8.25 percent chlorine", "Volume of Water to be Treated Bleach Solution to Add",
+      "Mix thoroughly and let stand for at least 60 minutes before drinking.", "Household bleach is typically between 5.25 percent and 8.25 percent chlorine. Read the\n label.",
+      "Add two drops of household bleach per gallon to maintain water quality while in storage."]) assert.ok(waPre.includes(s), "WA: " + s);
+    // USMC p152: drops (GTTS) per QUART, by bleach strength and clear / cloudy / cold water
+    assert.ok(usPre.includes(USMC_ROWS), "USMC bleach table verbatim");
+    assert.ok(usPre.includes("(b) Chlorine bleach. The strength of the solution, number of drops and contact time must be\n considered."), "table heading");
+    assert.ok(usPre.includes("(All figures are based on one quart\n of water.)"), "USMC scope: one quart");
+    // never edited: every excerpt is a slice of its source; a block per source, not merged
+    for (const b of ex){ for (const x of b.excerpts) assert.ok(b.hit.t.includes(x), "excerpt is a slice of the source text");
+      assert.equal(b.hit, hits[b.n - 1]); }
+    assert.equal(new Set(ex.map(b => b.n)).size, ex.length);
+    assert.equal(html.split("<figure").length - 1, ex.length);
+    assert.ok(ex.length <= E.LIMITS.sources && ex.every(b => b.excerpts.join("").length <= E.LIMITS.chars + 1200));
+  });
+}
+await test("retrieval: for amount questions, passages with dose figures rank higher (the drops table above its prose)", () => {
+  const rank = (q, opt) => R.scoreAll(ix2, q, opt).map(([, c]) => c);
+  const at = (list, f, p, k) => list.findIndex(c => c.f.startsWith(f) && c.p === p && c.t === WATER.filter(w => w.f.startsWith(f) && w.p === p)[k].t);
+  const off = rank(QB, {figures: false}), on = rank(QB);
+  assert.ok(at(off, "USMC", 152, 1) > at(off, "USMC", 152, 0), "without the boost the prose chunk is first");
+  assert.ok(at(on, "USMC", 152, 1) < at(on, "USMC", 152, 0), "with it the bleach table chunk is first");
+  assert.ok(at(on, "USMC", 152, 1) < on.findIndex(c => c.f === NOTES), "and above the note");
+  assert.ok(at(on, "WA-DoH", 2, 1) <= 1, "WA table chunk in the top two");
+  assert.equal(R.doseFigures(" 1% 10GTTS/30 MIN 20GTS/30 MIN 10GTTS/60MIN"), 4);
+  assert.equal(R.doseFigures("wait 30 minutes at 60 °C"), 0, "times and temperatures are not doses");
+  const s = "What should I do in a bushfire?";
+  assert.deepEqual(R.scoreAll(ix2, s).map(x => x[0]), R.scoreAll(ix2, s, {figures: false}).map(x => x[0]), "other questions unchanged");
+});
+await test("exact: USMC p208 (the halogen dose table the real index returns) is shown verbatim for the bleach question", () => {
+  for (const mc of [9000, R.sourceBudget(4096, QB)]){
+    const hits = R.search(ix2, QB, {maxChars: mc}), ex = E.extractExact(ix2, QB, hits);
+    const p208 = ex.filter(b => b.hit.f.startsWith("USMC") && b.hit.p === 208).flatMap(b => b.excerpts).join("\n");
+    assert.ok(p208.includes("Chlorination techniques Amount for Amount for\n 5 PPM 10 PPM\nHousehold bleach 5% 0.1 Ml 0.2 ml\n Sodium hypochlorie 2 gtts 4 gtts"), mc + ": " + p208);
+    assert.ok(p208.includes("Added to 1 liter or quart of water 4 PPM 8 PPM"), "per litre or quart");
+  }
+});
+await test("exact: a small library (only the two pages) still gets both tables", () => {
+  const i5 = R.createIndex(WATER.map(c => ({...c})));
+  for (const q of [Q, QB]){
+    const ex = E.extractExact(i5, q, R.search(i5, q)), text = f => ex.filter(b => b.hit.f.startsWith(f)).flatMap(b => b.excerpts).join("\n");
+    assert.ok(text("WA-DoH").includes(WA_ROWS), q); assert.ok(text("USMC").includes(USMC_ROWS), q);
+  }
+});
+await test("exact: the model is told not to write figures; an invented '20 drops per gallon' is removed, source figures stay", () => {
+  const hits = R.search(ix2, Q), ex = E.extractExact(ix2, Q, hits);
+  const m = R.buildMessages(Q, hits, title, where, ex);
+  assert.notEqual(m[0].content, R.SYSTEM_PROMPT);
+  assert.match(m[0].content, /do NOT write any figure yourself: no numbers, doses, amounts, ratios, percentages, temperatures or times, in digits or in words/);
+  assert.match(m[0].content, /never convert or combine them/);
+  for (const b of ex) assert.ok(m[0].content.includes(`[${b.n}]`), "names the sources shown");
+  assert.match(m[0].content, /Only (\[\d\] )+have their amounts shown: do not say that any other source gives amounts\./);
+  assert.match(R.exactRule([3]), /Only \[3\] has its amounts shown/);
+  assert.doesNotMatch(m[0].content, /give every dose, amount or time exactly/, "no rule asking it to restate amounts");
+  assert.match(m[0].content, /If the sources do not contain the answer, say so plainly/);
+  assert.match(m[1].content, /Do not write any amounts or times: they are shown to the reader word for word\.$/);
+  assert.equal(R.buildMessages(Q, hits, title, where, [])[0].content, R.SYSTEM_PROMPT, "no excerpts: the usual prompt");
+  const {html, removed} = E.renderAnswer(BAD, E.allowedText(ex, hits), n => hits[n - 1] ? link(hits[n - 1]) : null, true);
+  for (const f of ["20 drops per gallon", "10 drops per gallon", "10 drops of bleach per gallon", "10 drops per quart"])
+    assert.ok(!html.includes(f), "invented / converted figure shown: " + f);
+  assert.ok(html.includes("5 drops per quart"), "5 drops per quart is the WA row '1 quart/1 liter 5 drops'");
+  assert.equal(removed, 3);
+  assert.equal(html.split(E.REMOVED_HTML).length - 1, 3);
+  assert.match(html, /<p class="caution">3 amounts in the AI's answer weren't found in the sources and were removed - use the exact wording above\.<\/p>$/);
+  assert.match(html, /at least 60 minutes before drinking/, "a figure the source states word for word stays");
+  const ok = E.renderAnswer("Use the table: 1 gallon needs 1/4 teaspoon, 1 quart/1 liter 5 drops; or 2GTTS/30 MIN of 4-6% bleach [1].", E.allowedText(ex, hits), null, true);
+  assert.equal(ok.removed, 0); assert.doesNotMatch(ok.html, /removed|caution/);
+  assert.equal(E.renderAnswer("Boil it [1].", "", null, true).html, "<p>Boil it [1].</p>");
+  // whole figures only: a truncated number inside a longer one is not "word for word"
+  const tbl = " 1 gallon 1/4 teaspoon\n 2 quarts 15 drops\n wait 16 hours.";
+  for (const bad of ["4 teaspoon", "5 drops", "6 hours"]) assert.equal(E.guardFigures(`Use ${bad}.`, tbl).removed, 1, bad);
+  for (const good of ["1/4 teaspoon", "15 drops", "16 hours", "1 gallon"]) assert.equal(E.guardFigures(`Use ${good}.`, tbl).removed, 0, good);
+  assert.equal(E.guardFigures("Use 4 teaspoon and 5 drops [1].", E.allowedText(ex, hits)).removed, 1, "'4 teaspoon' vs WA '1/4 teaspoon'; '5 drops' is in WA in full");
+  assert.equal(E.guardFigures("Use 5 drops.", " 1 quart 15 drops").removed, 1);
+  assert.equal(E.guardFigures("Use 5 drops.", " 1 quart/1 liter 5 drops\n").removed, 0);
+  assert.equal(E.guardFigures("Use 5 drops.", "15 drops, or 5 drops").removed, 0, "a later whole match counts");
+  // the same figure written differently is kept (real Qwen3-4B answers on the small kit had these removed)
+  const A = E.allowedText(ex, hits);
+  for (const ok of ["boil it at a rolling boil for at least 1 minute to destroy germs [1][4]", "for at least one minute", "at least one full minute",
+    "for 1 full minute", "for a minute", "concentration of chlorine in the bleach, which typically ranges from 5.25% to 8.25% [2]",
+    "between 5.25% and 8.25%", "5.25-8.25%", "5.25 to 8.25 per cent", "5.25%", "1/4 tsp per gallon", "¼ teaspoon", "1 tsp for 5 gallons",
+    "2 teaspoons for 10 gallons", "2 gtts", "2 drops per gallon for storage", "10 drops per 1/2 gallon", "4 drops / 30 minutes",
+    "5 drops per litre", "one quart", "1 qt", "60 mins"])
+    assert.equal(E.guardFigures(ok, A).removed, 0, ok);
+  for (const bad of ["20 drops per gallon", "add 10 drops of bleach per gallon", "10 drops per quart", "3 drops per gallon", "1/2 teaspoon per gallon",
+    "5.5%", "5.25% to 9%", "6 drops", "90 minutes", "4 teaspoon", "1 hour"])
+    assert.equal(E.guardFigures(bad, A).removed, 1, bad);
+  // a "per" figure pairs two parts only within one real table row: not on a table flattened to one line
+  const flatWA = WATER.filter(w => w.f.startsWith("WA-DoH")).map(w => w.t).join(" ").replace(/\s+/g, " ");
+  for (const bad of ["10 drops per quart", "5 drops per gallon", "10 drops per gallon", "1/4 teaspoon per quart"])
+    assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened table: " + bad);
+  for (const ok of ["5 drops", "1/4 teaspoon", "2 drops per gallon", "5 drops per quart", "5 drops per 1 liter", "1/4 teaspoon per gallon",
+    "1/4 teaspoon per 1 gallon", "10 drops per 1/2 gallon", "10 drops per 2 liters", "1 teaspoon per 5 gallons", "2 teaspoons per 10 gallons"])
+    assert.equal(E.guardFigures(ok, flatWA).removed, 0, "flattened: " + ok);
+  for (const bad of ["5 drops per 1/2 gallon", "1/4 teaspoon per 5 gallons", "2 teaspoons per 5 gallons"])
+    assert.equal(E.guardFigures(bad, flatWA).removed, 1, "flattened, next row: " + bad);
+  // an amount-first table flattened to one line ("Bleach | Water"): never pair a row's amount with the next row's volume
+  const amountFirst = "Bleach Water 8 drops 1 gallon 1/2 teaspoon 5 gallons";
+  for (const bad of ["1/2 teaspoon per gallon", "1/2 teaspoon per 1 gallon", "8 drops per 5 gallons"])
+    assert.equal(E.guardFigures(bad, amountFirst).removed, 1, "amount first: " + bad);
+  assert.equal(E.guardFigures("1/2 teaspoon", amountFirst).removed, 0, "the figure itself is in the source");
+  // the browser-added version of both pages (rag.js chunkText collapses all whitespace)
+  const flat = WATER.map(w => w.t.replace(/\s+/g, " ")).join("\n");
+  for (const bad of ["10 drops per quart", "20 drops per gallon", "add 10 drops of bleach per gallon", "4 drops per quart"])
+    assert.equal(E.guardFigures(bad, flat).removed, 1, "browser-added: " + bad);
+  for (const ok of ["5 drops per quart", "1/4 teaspoon per gallon", "2GTTS/30 MIN", "4 drops per 30 minutes", "1 minute"])
+    assert.equal(E.guardFigures(ok, flat).removed, 0, "browser-added: " + ok);
+  for (const ok of ["5 drops per quart", "10 drops per 2 liters", "10 drops per 1/2 gallon", "1 teaspoon per 5 gallons"])
+    assert.equal(E.guardFigures(ok, A).removed, 0, "table row: " + ok);
+  for (const bad of ["5 drops per gallon", "10 drops per 1 liter"]) assert.equal(E.guardFigures(bad, A).removed, 1, "rows not mixed: " + bad);
+  // mixed numbers are whole figures, both ways
+  assert.deepEqual(E.figures("add 1 1/2 teaspoons, or 1½ teaspoons, or 2 ½ cups"), ["1 1/2 teaspoons", "1½ teaspoons", "2 ½ cups"]);
+  const mixed = "Bleach: 1 1/2 teaspoons per 5 gallons.";
+  for (const ok of ["1 1/2 teaspoons per 5 gallons", "1½ tsp per 5 gallons", "1 1/2 teaspoons"]) assert.equal(E.guardFigures(ok, mixed).removed, 0, ok);
+  for (const bad of ["1/2 teaspoon", "1/2 teaspoon per 5 gallons", "1 teaspoon"]) assert.equal(E.guardFigures(bad, mixed).removed, 1, bad);
+  for (const bad of ["1 1/2 teaspoons", "1½ teaspoons"]) assert.equal(E.guardFigures(bad, "Use 1/2 teaspoon.").removed, 1, bad);
+  assert.equal(E.guardFigures("1/2 teaspoon", "Use 1/2 teaspoon.").removed, 0);
+  assert.deepEqual(E.figures("12/20/2013, 1/4 teaspoon"), ["1/4 teaspoon"]);
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1 1/2 teaspoons.").removed, 0);
+  assert.equal(E.guardFigures("1½ teaspoons", "Add 1 1/2 teaspoons.").removed, 0, "1½ = 1 1/2");
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1½ teaspoons.").removed, 0, "1 1/2 = 1½");
+  assert.equal(E.guardFigures("1 1/2 teaspoons", "Add 1/2 teaspoon.").removed, 1);
+  assert.deepEqual(E.figures("2¼ cups"), ["2¼ cups"]);
+  assert.equal(E.guardFigures("add 2¼ cups of bleach", E.allowedText(ex, hits)).removed, 1, "invented 2¼ cups");
+  assert.equal(E.guardFigures("2¼ cups", "Use 2 1/4 cups.").removed, 0);
+  // no quadratic backtracking on padded PDF text
+  // (CI once took 653 ms on 20,000 spaces with an unbounded lookbehind; linear now: ~2 ms for 40,000)
+  const t0 = Date.now(); E.figures("1" + " ".repeat(40000) + "x"); E.figures(" ".repeat(40000) + "1/" + " ".repeat(40000) + "4 tsp");
+  assert.ok(Date.now() - t0 < 200, "slow regex: " + (Date.now() - t0) + " ms");
+  // with no excerpts shown, figures are checked against the sources sent
+  const s = E.renderAnswer("Pour vinegar for at least 30 seconds, then 5 minutes more.", "Pour vinegar liberally for at least 30 seconds", null, false);
+  assert.equal(s.removed, 1); assert.match(s.html, /at least 30 seconds/); assert.match(s.html, /<p class="caution">An amount in the AI's answer wasn't found in the sources and was removed - check the cited pages\.<\/p>$/);
+  assert.doesNotMatch(E.renderAnswer("x \u0001 y", "", null).html, /removed/, "the model cannot forge a marker");
+});
+await test("exact: no blocks for questions that are not about amounts; out-of-scope still answered 'not in the sources'", () => {
+  for (const q of ["What should I do in a bushfire?", "snake bite first aid", "How do I treat a snake bite?", "How do I fix a car engine?"]){
+    const hits = R.search(ix2, q);
+    assert.deepEqual(E.extractExact(ix2, q, hits), [], q);
+    assert.equal(E.renderExact([], title, where, link), "");
+    assert.equal(R.buildMessages(q, hits, title, where, E.extractExact(ix2, q, hits))[0].content, R.SYSTEM_PROMPT);
+  }
+  assert.match(R.SYSTEM_PROMPT, /If the sources do not contain the answer, say so plainly instead of answering from memory/);
+  // an amount question with nothing relevant in the sources gets no blocks either
+  for (const q of ["How much does a satellite phone cost?", "How many volts does a car battery have?"])
+    assert.deepEqual(E.extractExact(ix2, q, R.search(ix2, q)), [], q);
+});
+await test("exact: PDFs added in the browser (one-line text) and notes; source text is escaped", () => {
+  // rag.js chunkText() collapses all whitespace: the WA chunk becomes one line, so excerpts are sentences
+  const flat = WATER[4].t.replace(/\s+/g, " ");
+  const evil = "Treat water with bleach. <img src=x onerror=alert(1)> Add 8 drops of bleach per litre of water and wait 30 minutes. \"Done\" & ok.";
+  const mine = [{f: "my.pdf", p: 3, t: flat, blob: "blob:x"}, {f: "evil.pdf", p: 1, t: evil, blob: "blob:y"}];
+  const i3 = R.createIndex([...all2.map(c => ({...c})), mine[0]]);
+  const hits = R.search(i3, QB), ex = E.extractExact(i3, QB, hits);
+  const my = ex.find(b => b.hit.f === "my.pdf");
+  assert.ok(my, "user PDF gets a block: " + ex.map(b => b.hit.f).join("; "));
+  assert.ok(my.excerpts.join(" ").includes("1 quart/1 liter 5 drops 1/2 gallon/2 quarts/2 liters 10 drops 1 gallon 1/4 teaspoon"));
+  for (const x of my.excerpts) assert.ok(flat.includes(x));
+  assert.ok(E.renderExact(ex, title, where, link).includes(`href="blob:x#page=3" target="_blank" rel="noopener">[${my.n}]</a>`));
+  const i4 = R.createIndex([...WATER, mine[1]].map(c => ({...c}))), h4 = R.search(i4, QB), e4 = E.extractExact(i4, QB, h4);
+  assert.ok(e4.some(b => b.hit.f === "evil.pdf"), "evil chunk shown");
+  const html = E.renderExact(e4, title, where, link);
+  assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;"), "rendered as text");
+  assert.ok(!/<img|<(?!\/?(h3|p|figure|figcaption|a|pre)\b)[a-z]/i.test(html), "only our tags: " + html.match(/<[a-z]+/gi));
+  assert.ok(html.includes("&quot;Done&quot; &amp; ok."));
+  // a note section (string page, notes/ url)
+  const hn = R.search(i3, "How long should I boil water?"), en = E.extractExact(i3, "How long should I boil water?", hn);
+  const note = en.find(b => b.hit.f === NOTES);
+  assert.ok(note && note.excerpts.join("\n").includes("Boil water at a rolling boil for at least 1 minute"), en.map(b => b.hit.f).join("; "));
+  assert.ok(E.renderExact(en, title, where, link).includes(`href="notes/${NOTES}" target="_blank" rel="noopener">[${note.n}]</a> ${NOTES}, section &quot;Water&quot;`));
+});
+await test("exact: the page shows the blocks (rendered by exact.js, not the model) between the notice and the answer", () => {
+  const page = rel => fs.readFileSync(path.join(ROOT, rel), "utf8");
+  const h = page("www/docs/index.html"), js = page("www/docs/rag.js");
+  const e = h.indexOf('<div id="exact" class="exact" hidden></div>');
+  assert.ok(e > h.indexOf("ai-notice") && e < h.indexOf('<div id="answer"'));
+  assert.match(js, /from "\.\/exact\.js"/);
+  assert.match(js, /\$\("exact"\)\.innerHTML = renderExact\(exact, title, where, srcLink\)/);
+  assert.ok(js.indexOf('$("exact").innerHTML') < js.indexOf('$("searchOnly").checked'), "shown in search-only mode too, before the AI answers");
+  assert.match(js, /buildMessages\(q, hits, title, where, exact\)/);
+  assert.match(page("www/style.css"), /\.exact pre\{white-space:pre-wrap/);
+});
+
 // A real index from a kit build (www/docs/index.js is generated, git-ignored): the same check on real data.
 const IDX = path.join(ROOT, "www/docs/index.js");
 const real = fs.existsSync(IDX) ? (() => { const sb = {window: {}}; vm.runInNewContext(fs.readFileSync(IDX, "utf8"), sb); return sb.window.DOCS_INDEX; })() : null;
@@ -240,6 +473,22 @@ if (real && real.chunks.length > 1000) {
   await test("real index: 'make water safe to drink' gets passages with bleach quantities", () => {
     const h = R.search(R.createIndex(real.chunks.map(c => ({...c}))), Q);
     assert.match(h.map(x => x.t).join("\n"), QUANTITY, h.map(x => `${x.f} ${x.p}`).join("; "));
+  });
+  await test("real index: the water questions show the WA DoH and USMC amounts word for word", () => {
+    const rix = R.createIndex(real.chunks.map(c => ({...c})));
+    for (const q of [Q, "How much bleach do I add to purify water?"]){
+      const h = R.search(rix, q), ex = E.extractExact(rix, q, h), where = ex.map(b => `${b.hit.f} ${b.hit.p}`).join("; ");
+      const text = f => ex.filter(b => b.hit.f.startsWith(f)).flatMap(b => b.excerpts).join("\n");
+      assert.match(text("WA-DoH"), /1 gallon\s+1\/4 teaspoon/, `${q}: WA DoH table (${where})`);
+      assert.match(text("WA-DoH"), /5\.25-8\.25 percent chlorine/);
+      // a USMC bleach dose table: p152 (drops per quart by strength) or p208 (household bleach 5%, per litre or quart);
+      // on the real index the bleach question has returned p208, which is a legitimate dose table
+      const top = R.scoreAll(rix, q).slice(0, 12).map(([s, c]) => `${c.f} ${c.p} #${c.i} ${s.toFixed(1)}`).join("; ");
+      assert.ok(/4-6%\s+2GTTS\/30 MIN\s+4GTTS\/30 MIN\s+2GTTS\/60 MIN/.test(text("USMC")) ||
+        /Household bleach 5% 0\.1 Ml 0\.2 ml\s+Sodium hypochlorie 2 gtts 4 gtts/.test(text("USMC")),
+        `${q}: a USMC bleach table (shown: ${where}; top passages: ${top})`);
+      for (const b of ex) for (const x of b.excerpts) assert.ok(b.hit.t.includes(x), "excerpt is a slice of the source");
+    }
   });
 } else console.log("skip real-index check (www/docs/index.js is not a full kit index here)");
 
@@ -291,7 +540,7 @@ await test("answers: a trailing citation-only line is dropped, citations inside 
   assert.equal(R.tidyAnswer("Add 5 drops [2].\n[1][2]\n"), "Add 5 drops [2].\n");
   assert.equal(R.tidyAnswer("Add 5 drops [2]. [3]"), "Add 5 drops [2]. [3]");
   assert.equal(R.tidyAnswer("[1] says boil it."), "[1] says boil it.");
-  assert.match(page("www/docs/rag.js"), /renderMarkdown\(tidyAnswer\(txt\)/);
+  assert.match(page("www/docs/rag.js"), /renderAnswer\(tidyAnswer\(txt\)/);
 });
 await test("chat: kit system prompt and history trimming", () => {
   const p = chat.SYSTEM_PROMPT;
@@ -373,7 +622,8 @@ await test("context budget: manuals prompt and chat history fit a 4096-token con
     const hits = R.search(ix, q, {maxChars: R.sourceBudget(ctx, q)});
     const chars = hits.reduce((n, h) => n + h.t.length, 0);
     assert.ok(chars <= R.sourceBudget(ctx, q), `${q} @${ctx}: ${chars} chars of sources`);
-    const used = tokens(R.buildMessages(q, hits, c => "FM 21-76 US Army Survival Manual (public domain)", c => "page 227")) + R.ANSWER_TOKENS;
+    const exact = [1, 2, 3, 4].map(n => ({n}));
+    const used = tokens(R.buildMessages(q, hits, c => "FM 21-76 US Army Survival Manual (public domain)", c => "page 227", exact)) + R.ANSWER_TOKENS;
     assert.ok(used <= ctx, `${q} @${ctx}: ~${used} tokens > ${ctx}`);
   }
   // the water question still gets its quantities at 4096

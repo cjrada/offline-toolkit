@@ -1,0 +1,121 @@
+=== USMC-Wilderness-Medicine-Course.pdf page 152
+4. PURIFICATION. Simply consists of removing or destroying enough impurities to make
+ water safe and pleasant to drink.
+a. The first step in purifying is to select a treatment method. (All figures are based on one quart
+ of water.) The three different purifying methods are: (WMC.6.17c)
+(1) Boiling. The standard recommendation is to bring the water to a rolling boil for 1 minute at
+ sea level for complete sterilization of the water. Recent research showed that additional
+ boiling time for sterilization was not necessary and that boiling for two minutes at any
+ altitude rendered water safe for consumption.
+(2) Halogens. The number of tablets and contact time must be considered. All charts based on
+ one-quart canteen. (WMC.6.17d)
+(a) Iodine tablets.
+ TYPE WATER TABLETS CONTACT TIME
+ CLEAR 1 25 MIN
+ CLOUDY 2 25 MIN
+ COLD 2 25 MIN
+(b) Chlorine bleach. The strength of the solution, number of
+=== USMC-Wilderness-Medicine-Course.pdf page 152
+tablets.
+ TYPE WATER TABLETS CONTACT TIME
+ CLEAR 1 25 MIN
+ CLOUDY 2 25 MIN
+ COLD 2 25 MIN
+(b) Chlorine bleach. The strength of the solution, number of drops and contact time must be
+ considered.
+ PERCENT CLEAR WATER CLOUDY WATER COLD WATER
+ 1% 10GTTS/30 MIN 20GTS/30 MIN 10GTTS/60MIN
+ 4-6% 2GTTS/30 MIN 4GTTS/30 MIN 2GTTS/60 MIN
+ 7-10% 1 GTTS/30 MIN 2GTTS/30 MIN 1 GTTS/60 MIN
+(c) Iodine solution. The strength, number of drops and contact time must be considered.
+ PERCENT CLEAR WATER CLOUDY WATER COLD WATER
+ 2% 5GTTS/30 MIN 10GTTS/30 MIN 8GTTS/60 MIN
+ (d) Betadine solution.
+ CLEAR WATER CLOUDY WATER COLD WATER
+ 8GTTS/30 MIN 16GTTS/30 MIN 8GTTS/60 MIN
+(1) Filtration Most filters are not small enough to completely disinfect water. They remove
+ particulate debris, which allows lower halogen dose and improved appearance and taste of
+ "dirty" water. Filters clog quickly if the water is dirty or
+=== USMC-Wilderness-Medicine-Course.pdf page 152
+particulate debris, which allows lower halogen dose and improved appearance and taste of
+ "dirty" water. Filters clog quickly if the water is dirty or has a lot of suspended particles.
+ NEVER USE FILTERS AS YOUR SOLE METHOD OF WATER PURIFICATION.
+ 16
+ -5
+=== WA-DoH-Purifying-Water-in-an-Emergency.pdf page 2
+Water Purification :: Washington State Dept. of Health Page 2 of 2
+ Caution: Many chemical pollutants will not be removed by boiling.
+ Cloudy water should be filtered before boiling. Filter cloudy water using coffee filters, paper
+ towels, cheesecloth or a cotton plug in a funnel.
+ Bring the water to a rolling boil for at least one full minute.
+ Let the water cool before drinking.
+ Add two drops of household bleach per gallon to maintain water quality while in storage.
+Purifying by adding liquid chlorine bleach
+ Treat water by adding liquid household bleach, such as Clorox or Purex.
+ Household bleach is typically between 5.25 percent and 8.25 percent chlorine. Read the
+ label.
+ Avoid using bleaches that contain perfumes, dyes and other additives. Be sure to read
+ the label.
+ Cloudy water should be filtered before adding bleach.
+ Place the water in a clean container. Add the amount of
+=== WA-DoH-Purifying-Water-in-an-Emergency.pdf page 2
+additives. Be sure to read
+ the label.
+ Cloudy water should be filtered before adding bleach.
+ Place the water in a clean container. Add the amount of bleach according to the table
+ below.
+ Mix thoroughly and let stand for at least 60 minutes before drinking.
+ Treating water with household bleach containing 5.25-8.25 percent chlorine
+ Volume of Water to be Treated Bleach Solution to Add
+ 1 quart/1 liter 5 drops
+ 1/2 gallon/2 quarts/2 liters 10 drops
+ 1 gallon 1/4 teaspoon
+ 5 gallons 1 teaspoon
+ 10 gallons 2 teaspoons
+ Caution: Bleach will not kill some disease-causing organisms commonly found in surface
+ water. Bleach will not remove chemical pollutants.
+ DOH Pub 821-031
+ Revised - July 2013
+http://www.doh.wa.gov/Emergencies/EmergencyPreparednessandResponse/Factsheets/W... 12/20/2013
+=== USMC-Wilderness-Medicine-Course.pdf page 208
+a shelf life of one year, not to exceed the initial expiration date of four
+ years.
+ 49703
+ Month / Year / Batch Number
+ (3) Water Disinfecting Techniques and Halogen Doses.
+Iodination techniques Amount for Amount for
+Added to 1 liter or quart of water 4 PPM 8 PPM
+Iodine tablets
+Tetraglcine hydroperiodide EDWGT ½ tablet 1 tablet
+Potable Aqua
+Globaline
+2% iodine solution (tincture) 0.2 ml 0.4 ml
+ 5 gtts 10 gtts
+10% povidone-iodine solution* 0.35 ml 0.70 ml
+ 8 gtts 16 gtts
+Chlorination techniques Amount for Amount for
+ 5 PPM 10 PPM
+Household bleach 5% 0.1 Ml 0.2 ml
+ Sodium hypochlorie 2 gtts 4 gtts
+AquaClear 1 tablet
+ Sodium dichloroisocyanurate
+AquaCure, AquaPure, Chlor-floc 8 PPM
+ Chlorine plus flocculating agent 1 tablet
+ *Providone-iodine solutions release free iodine in levels adequate for disinfecting, but
+ scant data is available.
+ Measure with dropper (1 drop=0.05 ml) or
+=== USMC-Wilderness-Medicine-Course.pdf page 208
+done-iodine solutions release free iodine in levels adequate for disinfecting, but
+ scant data is available.
+ Measure with dropper (1 drop=0.05 ml) or tuberculin syringe
+ PPM-part per million gtts-drops ml-milliliter
+Concentration of Contact time in minutes at various water temperatures
+Halogen
+ 5 C / 40 F 15 C / 60 F 30 C / 85 F
+2 PPM 240 180 60
+4 PPM 180 50 45
+8 PPM 60 30 15
+NOTE: These contact times have been extended from the usual recommendations to account for
+recent data that prolonged contact time is needed in very cold water to kill Giardia cysts.
+ A6-
+ 5
