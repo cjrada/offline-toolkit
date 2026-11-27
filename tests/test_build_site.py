@@ -243,7 +243,7 @@ class Page(unittest.TestCase):
             notice = json.load(fh)["sources"]
         self.assertIn(f'<p class="warn ai-notice" role="note">{notice}</p>', sec)
         for s in ("AI can make mistakes.", "Always cross-check answers with the linked sources.",
-                  "Sources can be wrong or out of date too, but they're far more reliable than the AI alone."):
+                  "Sources can be wrong or out of date too, but they're more reliable than the AI alone."):
             self.assertIn(s, notice)
         self.assertNotIn("<details", sec)
         imgs = re.findall(r"<img [^>]*>", sec)

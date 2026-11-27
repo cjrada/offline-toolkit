@@ -249,7 +249,8 @@ const box = k => `<p class="warn ai-notice" role="note">${notice[k]}</p>`;
 await test("notice text says the three things", () => {
   for (const k of ["sources", "chat"]){
     assert.match(notice[k], /^<b>AI can make mistakes\.<\/b> Always cross-check answers /);
-    assert.match(notice[k], /Sources can be wrong or out of date too, but they're far more reliable than the AI alone\.$/);
+    assert.match(notice[k], /Sources can be wrong or out of date too, but they're more reliable than the AI alone\.$/);
+    assert.doesNotMatch(notice[k], /far more/i);
   }
   assert.match(notice.sources, /cross-check answers with the linked sources\./);
   assert.match(notice.chat, /against the Library or the manuals/);

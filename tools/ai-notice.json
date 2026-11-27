@@ -1,5 +1,5 @@
 {
   "_comment": "The 'AI can make mistakes' notice. One wording for the kit pages and the downloads site: tools/build_site.py reads 'sources' from here, and tests/test_kit_js.mjs checks that www/index.html, www/docs/index.html (sources) and www/chat/index.html (chat) carry exactly this HTML inside <p class=\"warn ai-notice\" role=\"note\">.",
-  "sources": "<b>AI can make mistakes.</b> Always cross-check answers with the linked sources. Sources can be wrong or out of date too, but they're far more reliable than the AI alone.",
-  "chat": "<b>AI can make mistakes.</b> Always cross-check answers against the Library or the manuals (Ask the Manuals links its sources). Sources can be wrong or out of date too, but they're far more reliable than the AI alone."
+  "sources": "<b>AI can make mistakes.</b> Always cross-check answers with the linked sources. Sources can be wrong or out of date too, but they're more reliable than the AI alone.",
+  "chat": "<b>AI can make mistakes.</b> Always cross-check answers against the Library or the manuals (Ask the Manuals links its sources). Sources can be wrong or out of date too, but they're more reliable than the AI alone."
 }
