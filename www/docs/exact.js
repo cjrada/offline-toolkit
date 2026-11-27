@@ -33,7 +33,7 @@ const ADJ = "(?:(?:full|whole|level|heaped|heaping)\\s+)?";
 const TAIL = `(?:\\s*(?:\\/|\\bper\\b|\\bfor\\s+(?:each|every)\\b|\\bto\\b|\\bin\\b|\\bof\\s+[a-z]+(?:\\s+[a-z]+)?\\s+(?:per|to|in|for\\s+(?:each|every))\\b)` +
   `\\s*(?:(?:a|an|each|every|${N1})\\s*-?\\s*)?${ADJ}${UNIT})?`;
 // A figure: a number with a unit, with an optional "per gallon" / "/30 MIN" / "of bleach per litre" part.
-export const FIGURE_SRC = `${NUM}\\s*-?\\s*${ADJ}(?:a\\s+)?${UNIT}${TAIL}`;
+export const FIGURE_SRC = `${NUM}\\s*(?:-\\s*)?${ADJ}(?:a\\s+)?${UNIT}${TAIL}`;
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
 export const figures = s => [...String(s).matchAll(new RegExp(FIGURE_SRC, "gi"))].map(m => m[0]);
 
@@ -46,8 +46,8 @@ export const quantityQuestion = q => AMOUNT_Q.test(q) || wantsSafeWater(q);
 const GENERIC = new Set(["much", "many", "long", "often", "strong", "add", "use", "make", "need", "put", "get", "take", "give",
   "dose", "dosage", "amount", "quantity", "quantities", "ratio", "drop", "teaspoon", "tablespoon", "ml", "litre", "liter", "quart", "gallon",
   "tablet", "ppm", "percent", "minute", "hour", "temperature", "degree", "safe",
-  "have", "has", "had", "not", "no", "any", "all", "some", "more", "most", "less", "need", "needs", "one", "every", "each", "per", "used",
-  "go", "keep", "much", "very", "just", "also", "only", "other", "own", "same", "too", "after", "before", "up", "out", "off", "over"]
+  "have", "has", "had", "not", "no", "any", "all", "some", "more", "most", "less", "needs", "one", "every", "each", "per", "used",
+  "go", "keep", "very", "just", "also", "only", "other", "own", "same", "too", "after", "before", "up", "out", "off", "over"]
   .map(w => tok(w)[0] || w));
 
 // Lines (text with line breaks, as in index.js) or sentences (one-line text, as for PDFs added in the browser),
@@ -127,9 +127,16 @@ export const allowedText = (blocks, hits) => (blocks.length ? blocks.flatMap(b =
 const norm = s => s.toLowerCase().replace(/\s+/g, " ");
 
 // Figures in the answer that are not word for word in `allowed` become a marker. -> {text, removed}
+// A whole-figure match only: "4 teaspoon" is not in "1/4 teaspoon", nor "5 drops" in "15 drops", nor "6 hours" in "16 hours".
+export function inWords(allowed, fig){
+  const a = norm(allowed), f = norm(fig).trim();
+  for (let i = a.indexOf(f); f && i >= 0; i = a.indexOf(f, i + 1))
+    if (!/[\w.\/]/.test(a[i - 1] || "") && !/[a-z0-9]/.test(a[i + f.length] || "")) return true;
+  return false;
+}
 export function guardFigures(text, allowed){
-  const a = norm(allowed); let removed = 0;
-  text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), m => a.includes(norm(m)) ? m : (removed++, "\u0001"));
+  let removed = 0;
+  text = String(text).replace(/\u0001/g, "").replace(new RegExp(FIGURE_SRC, "gi"), m => inWords(allowed, m) ? m : (removed++, "\u0001"));
   return {text, removed};
 }
 export const REMOVED_HTML = '<span class="removed" title="The AI wrote an amount that is not word for word in the sources">[amount removed]</span>';

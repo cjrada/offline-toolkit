@@ -327,6 +327,16 @@ await test("exact: the model is told not to write figures; an invented '20 drops
   const ok = E.renderAnswer("Use the table: 1 gallon needs 1/4 teaspoon, 1 quart/1 liter 5 drops; or 2GTTS/30 MIN of 4-6% bleach [1].", E.allowedText(ex, hits), null, true);
   assert.equal(ok.removed, 0); assert.doesNotMatch(ok.html, /removed|caution/);
   assert.equal(E.renderAnswer("Boil it [1].", "", null, true).html, "<p>Boil it [1].</p>");
+  // whole figures only: a truncated number inside a longer one is not "word for word"
+  const tbl = " 1 gallon 1/4 teaspoon\n 2 quarts 15 drops\n wait 16 hours.";
+  for (const bad of ["4 teaspoon", "5 drops", "6 hours"]) assert.equal(E.guardFigures(`Use ${bad}.`, tbl).removed, 1, bad);
+  for (const good of ["1/4 teaspoon", "15 drops", "16 hours", "1 gallon"]) assert.equal(E.guardFigures(`Use ${good}.`, tbl).removed, 0, good);
+  assert.equal(E.guardFigures("Use 4 teaspoon and 5 drops [1].", E.allowedText(ex, hits)).removed, 1, "'4 teaspoon' vs WA '1/4 teaspoon'; '5 drops' is in WA in full");
+  assert.equal(E.guardFigures("Use 5 drops.", " 1 quart 15 drops").removed, 1);
+  assert.equal(E.guardFigures("Use 5 drops.", " 1 quart/1 liter 5 drops\n").removed, 0);
+  assert.equal(E.guardFigures("Use 5 drops.", "15 drops, or 5 drops").removed, 0, "a later whole match counts");
+  // no quadratic backtracking on padded PDF text
+  const t0 = Date.now(); E.figures("1" + " ".repeat(20000) + "x"); assert.ok(Date.now() - t0 < 500, "slow regex: " + (Date.now() - t0) + " ms");
   // with no excerpts shown, figures are checked against the sources sent
   const s = E.renderAnswer("Pour vinegar for at least 30 seconds, then 5 minutes more.", "Pour vinegar liberally for at least 30 seconds", null, false);
   assert.equal(s.removed, 1); assert.match(s.html, /at least 30 seconds/); assert.match(s.html, /Check the cited pages for the exact amounts\./);
