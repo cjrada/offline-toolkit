@@ -45,6 +45,7 @@ const MED_NAMES = "paracetamol|acetaminophen|panadol|panamax|dymadon|ibuprofen|n
   "antibiotics?|amox[iy]cillin|augmentin|penicillin|flucloxacillin|cephalexin|keflex|doxycycline|azithromycin|ciprofloxacin|metronidazole|trimethoprim|" +
   "antihistamines?|loratadine|claratyne|cetirizine|zyrtec|fexofenadine|telfast|promethazine|phenergan|diphenhydramine|" +
   "prednisolone|prednisone|dexamethasone|salbutamol|ventolin|adrenaline|epinephrine|epipen|insulin|metformin|warfarin|" +
+  "potassium\\s+iod(?:ide|ate)|ki|thyrosafe|iosat|thyroshield|" +
   "diazepam|valium|temazepam|melatonin|loperamide|gastrostop|ondansetron|maxolon|metoclopramide|hydralyte|" +
   "medicines?|medications?|meds|painkillers?|pain ?relie(?:f|vers?)|analgesics?|drugs?|syrups?";
 export const MED = new RegExp(`\\b(?:${MED_NAMES})\\b`, "i");
@@ -54,7 +55,8 @@ const SAME_DRUG = [["paracetamol", "acetaminophen", "panadol", "panamax", "dymad
   ["aspirin", "disprin", "cartia"], ["amoxicillin", "amoxycillin", "augmentin"], ["diclofenac", "voltaren"], ["naproxen", "naprosyn"],
   ["oxycodone", "endone"], ["cephalexin", "keflex"], ["loratadine", "claratyne"], ["cetirizine", "zyrtec"], ["fexofenadine", "telfast"],
   ["promethazine", "phenergan"], ["salbutamol", "ventolin"], ["adrenaline", "epinephrine", "epipen"], ["diazepam", "valium"],
-  ["loperamide", "gastrostop"], ["metoclopramide", "maxolon"]];
+  ["loperamide", "gastrostop"], ["metoclopramide", "maxolon"],
+  ["potassium iodide", "potassium iodate", "ki", "thyrosafe", "iosat", "thyroshield"]];
 const GENERIC_MED = /^(?:medicines?|medications?|meds|painkillers?|pain ?relie(?:f|vers?)|analgesics?|drugs?|syrups?|antibiotics?|antihistamines?)$/i;
 const canonical = w => { w = w.toLowerCase().replace(/\s+/g, " "); const g = SAME_DRUG.find(g => g.includes(w)); return g ? g[0] : w; };
 // The named medicines in text, as canonical names ("Panadol" -> "paracetamol").
@@ -64,7 +66,11 @@ export const medicineQuestion = q => MED.test(String(q));
 // Water treatment: iodine tablets ("16 mg iodine tablets"), chlorine in mg, bleach, purification. Not a medicine
 // dose, unless a medicine is named in the same conversation (then the medicine rules win: failing safe).
 const WATER = /\b(?:water|purif\w*|disinfect\w*|chlorin\w*|iodine|bleach|hypochlorite|aquatabs|potable|steril[iy][sz]\w*)\b/i;
-const waterOnly = s => WATER.test(s) && !MED.test(s);
+// A radiation dose is not a medicine dose ("What radiation dose is dangerous?"); the AI answers it as usual.
+const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µsv|usv|rems?|grays?|gy|x-?rays?|fallout|nuclear)\b/i;
+// "Iodine tablets" with a radiation word means potassium iodide (a medicine), not water treatment.
+const radiationIodine = s => RADIATION.test(s) && /\biodine\b/i.test(s);
+const waterOnly = s => WATER.test(s) && !MED.test(s) && !radiationIodine(s);
 
 // Numbers in digits or words ("7.5", "4 to 6", "four", "four to six").
 const NW = "(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|half|a half|quarter|one and a half)";
@@ -77,6 +83,8 @@ const hasAlways = s => new RegExp(ALWAYS.source, "i").test(s);
 const IN_MED = new RegExp(`(?<![\\w.])${N}\\s*(?:ml|mls|millilit\\w*|g\\b|grams?|tablets?|tabs?|capsules?|caps|caplets?|pills?|drops?|teaspoons?|tsp|tablespoons?|tbsp|puffs?|doses?|sachets?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day))?` +
   `|\\bevery\\s+${N}\\s*(?:hours?|hrs?|h)\\b|\\b${N1}[- ]hourly\\b` +
   `|\\b(?:once|twice|thrice|${N}\\s*(?:times|x))\\s*(?:(?:a|per|each)\\s+day|daily)\\b|\\bfor\\s+${N}\\s*days\\b` +
+  // a fraction of a unit: "half a tablet", "a quarter of a tablet", "one and a half tablets"
+  `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:tablets?|tabs?|capsules?|caplets?|pills?|teaspoons?|tsp|tablespoons?|doses?|sachets?)\\b` +
   // a daily maximum with no unit: "max 6 in a day", "no more than 8 in 24 hours", "up to 4 a day"
   `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b`, "gi");
 // The earlier user turns of a conversation, as text (history: [{role, content}] or [string]).
@@ -91,11 +99,9 @@ const userTurns = (history = []) => history.map(m => typeof m === "string" ? m :
 // An explicit dose word: also a medicine the list does not name ("What is the dose of Testamol?"), so documents added
 // to the index later are found the same way. "How much water should I drink with a fever?" is not one.
 const DOSE_WORD = /\b(?:doses?|dosage|dosing|milligrams?|micrograms?|mg|mcg|mg\/kg)\b/i;
-// A radiation dose is not a medicine dose ("What radiation dose is dangerous?"); the AI answers it as usual.
-const RADIATION = /\b(?:radiation|radioactiv\w*|sieverts?|millisieverts?|msv|µsv|usv|rems?|grays?|gy|x-?rays?|fallout|nuclear)\b/i;
 export function medicineDoseQuestion(q, prior = []){
   q = String(q); const before = userTurns(prior);
-  if (MED.test(q) && ASKS_AMOUNT.test(q)) return true;
+  if ((MED.test(q) || radiationIodine(q)) && ASKS_AMOUNT.test(q)) return true;   // also "potassium iodide / KI / iodine tablets for radiation"
   if (waterOnly(q)) return false;                       // "How many 16 mg iodine tablets per quart?", also after a medicine turn
   return hasAlways(q) || (DOSE_WORD.test(q) && !RADIATION.test(q)) || (MED.test(before) && ASKS_AMOUNT.test(q));
 }
@@ -128,7 +134,7 @@ export function guardMedicine(q, answer, prior = [], {chat = false} = {}){
   if (medicineDoseQuestion(q, prior)) return {text: chat ? CHAT_REFUSAL : NOT_COVERED, refused: true, removed: 0, pointer: false};
   let text = String(answer);
   // a water-treatment question is not in the medicine conversation before it; its own answer still counts
-  const medicine = MED.test(String(q)) || (!waterOnly(String(q)) && MED.test(userTurns(prior))) || MED.test(text);
+  const medicine = MED.test(String(q)) || radiationIodine(String(q)) || (!waterOnly(String(q)) && MED.test(userTurns(prior))) || MED.test(text);
   const spans = medicineDoseSpans(text, {medicine});
   for (const [a, b] of spans.slice().reverse()) text = text.slice(0, a) + DOSE_REMOVED + text.slice(b);
   const pointer = (spans.length > 0 || medicine) && !/1800\s?022\s?222/.test(text);

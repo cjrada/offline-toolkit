@@ -801,6 +801,18 @@ await test("medicine: Ask the Manuals shows a source dose word for word with its
   assert.equal(E.medicineRoute("What is the dose of Testamol for an adult?", blk(MED_DOC.t, " Adults: 500 mg every 4 to 6 hours.")).box.length, 1, "an unlisted drug's own line still shows");
   // a radiation dose is not a medicine dose (optional item of the same review)
   for (const q of ["What radiation dose is dangerous?", "What dose of radiation in mSv is safe after fallout?"]) assert.ok(!MD.medicineDoseQuestion(q), q);
+  // ...but potassium iodide (KI), the radiation medicine, is a medicine (review of 40b7692)
+  for (const q of ["What dose of potassium iodide after a nuclear accident?", "What dose of KI should I take for radiation?",
+      "How many potassium iodide tablets for a child after fallout?", "potassium iodide dose for a child?", "What dose of iodine tablets for radiation?",
+      "How much ThyroSafe for an adult?"])
+    assert.ok(MD.medicineDoseQuestion(q), q);
+  for (const [q, a] of [["Should I take potassium iodide after fallout?", "Adults should take 2 tablets once a day. Children take half a tablet, babies a quarter of a tablet."],
+      ["Do iodine tablets help with radiation?", "Adults should take 2 tablets once a day."]]){
+    const g = MD.guardMedicine(q, a);
+    assert.doesNotMatch(g.text, /2 tablets|once a day|half a tablet|quarter of a tablet/, q + " -> " + g.text); assert.ok(g.removed > 0 && g.text.endsWith(MD.POINTER), q);
+  }
+  assert.ok(!MD.medicineDoseQuestion("How many iodine tablets per quart of water?"), "iodine for water is still water treatment");
+  assert.deepEqual([...MD.medicinesIn("Potassium iodide (KI, ThyroSafe) 130 mg")], ["potassium iodide"], "one drug, brand names included");
   const js2 = page("www/docs/rag.js");
   assert.match(js2, /exact = withoutMedicineDoses\(exact\);/);
   assert.ok(js2.indexOf("exact = withoutMedicineDoses(exact);") < js2.indexOf('$("exact").innerHTML = renderExact(exact'), "dose lines dropped before the usual box is rendered");
