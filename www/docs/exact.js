@@ -29,6 +29,7 @@
 import {queryTerms, tok, FIGURE_SRC, quantityQuestion, figureInText} from "./retrieve.js";
 import {renderMarkdown, esc} from "../md.js";
 import {checkDoses, markSpans} from "./dose.js";
+import {medicineDoseQuestion} from "../medicine.js";
 
 export {FIGURE_SRC, figures, quantityQuestion, figureInText} from "./retrieve.js";
 const hasFigure = s => new RegExp(FIGURE_SRC, "i").test(s);
@@ -59,7 +60,7 @@ export const LIMITS = {sources: 4, chars: 2200, leadIn: 3, leadChars: 240, gap: 
 
 // The verbatim excerpts for q: [{n, hit, excerpts: [string]}] (n = the source's number in the answer), or [].
 export function extractExact(ix, q, hits){
-  if (!quantityQuestion(q)) return [];
+  if (!quantityQuestion(q) || medicineDoseQuestion(q)) return [];   // never show medicine doses, not even a source's
   const qt = queryTerms(q), N = Math.max(1, ix.chunks.length);
   const topic = [...qt].filter(([t]) => !GENERIC.has(t) && !/^\d+$/.test(t));
   // idf, at least 1: in a small library (a few PDFs added in the browser) every word is "common"

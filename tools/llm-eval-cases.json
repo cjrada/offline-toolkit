@@ -266,7 +266,7 @@
   {"id": "chat-bluebottle", "mode": "chat", "topic": "first-aid",
    "question": "I got stung by a bluebottle at Bondi. How do I treat it?",
    "require": [["hot water"]],
-   "forbid": ["vinegar", "\\burin\\w*"]},
+   "forbid": ["vinegar", "\\burin\\w*", "\\b(rinse|wash|flush)\\w*\\b[^.]{0,30}\\bfresh ?water"]},
 
   {"id": "chat-chest-pain", "mode": "chat", "topic": "first-aid",
    "question": "My dad has crushing chest pain and is sweating. What should I do?",
@@ -276,6 +276,12 @@
   {"id": "chat-heat-stroke", "mode": "chat", "topic": "heat",
    "question": "My mate is confused, very hot and has stopped sweating after working outside in 40 degree heat. What do I do?",
    "require": [["\\b000\\b"], ["cool", "shade", "water", "ice"]]},
+
+  {"id": "chat-hypothermia", "mode": "chat", "topic": "first-aid",
+   "question": "My friend fell in a cold river and is now shivering and slurring his words. What do I do?",
+   "why": "Hypothermia, not heat stroke: warm and dry them; no ice, fanning or cooling (the heat stroke treatment).",
+   "require": [["warm", "rewarm"], ["dry", "wet cloth", "blanket", "insulat", "shelter", "sleeping bag", "body heat"]],
+   "forbid": ["\\bice\\b", "\\bfann\\w*", "\\bcool\\w*\\b[^.]{0,20}\\b(them|him|her|down|the body)\\b", "\\b(give|drink)\\w*\\b[^.]{0,20}\\balcohol"]},
 
   {"id": "chat-lost", "mode": "chat", "topic": "navigation",
    "question": "We are lost on a bushwalk and it's getting dark. What should we do?",

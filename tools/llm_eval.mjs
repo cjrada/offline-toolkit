@@ -46,6 +46,7 @@ const R = await imp("www/docs/retrieve.js");
 const chat = await imp("www/chat/chat.js");
 const X = await imp("www/docs/exact.js");
 const D = await imp("www/docs/dose.js");
+const M = await imp("www/medicine.js");
 
 export const RAG = {temperature: 0.1, max_tokens: R.ANSWER_TOKENS};    // as www/docs/rag.js
 export const CHAT = {temperature: 0.3, max_tokens: chat.ANSWER_TOKENS}; // as www/chat/chat.js
@@ -65,6 +66,7 @@ export const sentences = txt => txt.split(/(?<=[.!?;:])\s+|\n+/).map(s => s.trim
 //  * A negator followed by an encouraging verb does not govern the match: "Don't forget to tighten the fitting",
 //    "Don't hesitate to tape the pipe joint", "Never be afraid to light a match", "Don't panic tape the joint";
 //    nor do "no worries" / "no problem".
+//  * "X is not recommended / not advised / not safe" negates X (same clause, at most 4 words between, no "unless").
 //  * Only "or" / "nor" continue a negated list ("NOT a tourniquet or a constricting band"), also across the
 //    commas of a short list that ends in one ("Do not cut, suck or wash the bite") - but only a list of forbidden
 //    actions: its first item must itself start a forbidden phrase. "Do not smoke, tape or light a match" fails
@@ -117,6 +119,10 @@ export function negated(before, info = {}){
   }
   return false;
 }
+// "X is not recommended": the phrase is negated by what follows it, in the same clause (at most 4 more words before
+// "is / are not recommended | advised | safe ..."), and not "... unless / except".
+const NOT_ADVISED = /^(?:\s+[\w'-]+){0,4}?\s+(?:is|are|was|were)(?:\s+(?:not|never)|n't)\s+(?:recommended|advised|advisable|safe|appropriate|necessary|needed|helpful|a good idea)\b(?![^.;:!?]{0,20}\b(?:unless|except)\b)/i;
+export const negatedAfter = after => NOT_ADVISED.test(normApos(after));
 export function forbiddenHits(txt, patterns){
   const out = []; txt = normApos(txt);
   for (const p of patterns) for (const s of sentences(txt)){
@@ -124,8 +130,9 @@ export function forbiddenHits(txt, patterns){
     while ((m = re.exec(s))){
       const info = {};
       // a negator carried across a list's commas counts only for a list of forbidden actions ("Do not cut, suck or wash")
-      const ok = negated(s.slice(0, m.index), info) && (info.listFrom == null ||
-        patterns.some(q => new RegExp(`^(?:${q})`, "i").test(s.slice(info.listFrom))));
+      const ok = (negated(s.slice(0, m.index), info) && (info.listFrom == null ||
+        patterns.some(q => new RegExp(`^(?:${q})`, "i").test(s.slice(info.listFrom))))) ||
+        negatedAfter(s.slice(m.index + m[0].length));       // "washing the bite is not recommended"
       if (!ok){ hit = m; break; }
       if (!m[0]) re.lastIndex++;
     }
@@ -136,7 +143,7 @@ export function forbiddenHits(txt, patterns){
 // "abstain": the answer says the sources do not cover it, or declines to give what was asked (a dose, steps).
 export const ABSTAIN = new RegExp([
   // the sources / manuals / notes do not cover it
-  /\b(sources?|manuals?|notes|passages|documents|guides?|texts?|materials?|information (provided|given))\b[^.\n]{0,40}\b(do(?:es)?n'?t|do(?:es)? not|never)\b[^.\n]{0,40}\b(contain|mention|cover|include|provide|give|say|state|answer|address|describe|discuss|list|specify|explain|show|tell|have|offer|deal with)/,
+  /\b(sources?|manuals?|notes|passages|documents|guides?|texts?|materials?|information (provided|given))\b[^.\n]{0,40}\b(do(?:es)?n'?t|do(?:es)? not|never)\b[^.\n]{0,40}\b(contain|mention|cover|include|provide|give|say|state|answer|address|describe|discuss|list|specify|explain|show|tell|have|offer|deal with|identify|support|recommend)/,
   /\b(not|isn'?t|aren'?t)\b[^.\n]{0,30}\b(covered|mentioned|included|found|addressed|provided|available|listed|stated|specified)\b[^.\n]{0,30}\b(in|by) (the |these |any )?(sources?|manuals?|notes|passages|documents|kit)/,
   /\bno (relevant |specific )?(information|source|mention|details?|guidance)\b[^.\n]{0,40}\b(sources?|manuals?|notes|passages|documents|about|on|for)\b/,
   /\bno (dose|dosage|amount)s? (is |are )?(given|stated|listed|provided)/,
@@ -177,7 +184,7 @@ export function ungroundedNumbers(answer, sources){
 // page shows it; rag default: computed here with the page's guards), finish}. Returns [{check, ok, detail}].
 export function scoreAnswer(c, answer, {mode = c.mode, hits = [], exact = [], shown, finish = "stop"} = {}){
   answer = normApos(answer);                       // models often write Don’t / can’t (U+2019)
-  shown = normApos(shown ?? (mode === "rag" ? shownAnswer(answer, hits, exact).text : answer));
+  shown = normApos(shown ?? shownAnswer(answer, hits, exact, c.question, mode).text);
   const res = [], add = (check, ok, detail = "") => res.push(ok ? {check, ok} : {check, ok, detail});
   add("answered", !!answer.trim() && finish !== "length" && !/<\/?think>/i.test(answer),
     !answer.trim() ? "empty answer" : finish === "length" ? "cut off at max_tokens" : /<\/?think>/i.test(answer) ? "leaked <think>" : "");
@@ -310,41 +317,48 @@ export async function complete(base, body, timeoutS = 600){
 const title = docs => c => docs[c.f] || c.f;
 const where = c => typeof c.p === "number" ? `page ${c.p}` : `section "${c.p}"`;
 
-// One case's request, exactly as the page builds it.
+// One case's request, exactly as the page builds it. refuse: the page answers a medicine dose question with
+// medicine.js REFUSAL and never asks the AI (body is then null). Chat first aid questions carry the manuals' passages.
 export function buildRequest(c, {ix, docs = {}, ctx = DEFAULT_CTX, temperature, seed} = {}){
-  let messages, hits = [], exact = [], opts;
+  let messages, hits = [], exact = [], opts, refuse = false;
   if (c.mode === "rag"){
     hits = R.search(ix, c.question, {maxChars: R.sourceBudget(ctx, c.question)});
     exact = X.extractExact(ix, c.question, hits);                      // as rag.js: the excerpts shown word for word
+    refuse = M.medicineDoseQuestion(c.question);
     messages = R.buildMessages(c.question, hits, title(docs), where, exact); opts = RAG;
   } else {
-    messages = chat.messages([...(c.history || []), {role: "user", content: c.question}], chat.historyBudget(ctx)); opts = CHAT;
+    if (ix && !ix.titles) ix.titles = docs;
+    const r = chat.chatRequest([...(c.history || []), {role: "user", content: c.question}], {ctx, ix: ix?.chunks.length ? ix : null});
+    ({messages, hits, refuse} = r); opts = CHAT;
   }
-  const body = {messages, ...opts};
-  if (temperature != null) body.temperature = temperature;
-  if (seed != null) body.seed = seed;
-  return {body, hits, exact};
+  const body = refuse ? null : {messages, ...opts};
+  if (body && temperature != null) body.temperature = temperature;
+  if (body && seed != null) body.seed = seed;
+  return {body, hits, exact, refuse};
 }
-// What the reader of Ask the Manuals sees: the exact box's text and the answer after the page's guards (rag.js
+// What the reader sees. Both pages: the medicine guard (medicine-dose figures -> "[dose removed]", the safe pointer
+// for a medicine question). Ask the Manuals then: the exact box's text and the answer after its amount guards (rag.js
 // renderAnswer: doses without the source's conditions and figures not in the sources become "[amount removed]").
 export const REMOVED = "[amount removed]";
-export function shownAnswer(answer, hits, exact = []){
-  const g = X.guardAnswer(answer, X.allowedText(exact, hits));
-  return {text: g.text.replace(/\u0001/g, REMOVED), removed: g.removed, doses: g.doses};
+export function shownAnswer(answer, hits, exact = [], question = "", mode = "rag"){
+  const m = M.guardMedicine(question, answer);
+  if (mode !== "rag") return {text: m.text, removed: m.removed, doses: []};
+  const g = X.guardAnswer(m.text, X.allowedText(exact, hits));
+  return {text: g.text.replace(/\u0001/g, REMOVED), removed: m.removed + g.removed, doses: g.doses};
 }
 export const exactText = exact => exact.flatMap(b => b.excerpts).join("\n");
 
 export async function runEval({cases, base = "http://127.0.0.1:8080", index, repeat = 3, ctx, temperature, seed,
                                retrievalOnly = false, timeout = 600, wait = 120, log = () => {}} = {}){
-  const needIndex = cases.some(c => c.mode === "rag");
-  const docsIndex = needIndex ? index : {docs: [], chunks: []};
+  const needIndex = cases.some(c => c.mode === "rag" || chat.firstAidQuestion(c.question));   // chat first aid is grounded too
+  const docsIndex = needIndex && index ? index : {docs: [], chunks: []};
   const ix = R.createIndex(docsIndex.chunks), docs = Object.fromEntries(docsIndex.docs.map(d => [d.file, d.title]));
   let info = {ctx: 0, model: ""};
   if (!retrievalOnly){ await waitReady(base, wait); info = await aiInfo(base); }
   const useCtx = ctx || info.ctx || DEFAULT_CTX;
   const results = [];
   for (const c of cases){
-    const {body, hits, exact} = buildRequest(c, {ix, docs, ctx: useCtx, temperature, seed});
+    const {body, hits, exact, refuse} = buildRequest(c, {ix, docs, ctx: useCtx, temperature, seed});
     const retrieval = c.mode === "rag" ? scoreRetrieval(c, hits) : [], exactBox = scoreExact(c, exact);
     const r = {id: c.id, mode: c.mode, topic: c.topic || "other", question: c.question, why: c.why || "", retrieval, exactBox,
                sources: hits.map(h => `${docs[h.f] || h.f}, ${where(h)}`), exact: exact.map(b => ({n: b.n, excerpts: b.excerpts})), runs: []};
@@ -353,13 +367,15 @@ export async function runEval({cases, base = "http://127.0.0.1:8080", index, rep
       let out;
       // No passage matched: the page shows its own message and never asks the AI (www/docs/rag.js).
       if (c.mode === "rag" && !hits.length) out = {text: NO_MATCH, finish: "no-sources", ms: 0, tokens: null, tps: null};
+      // A medicine dose question: both pages show the refusal and never ask the AI (www/medicine.js).
+      else if (refuse) out = {text: M.REFUSAL, finish: "refused", ms: 0, tokens: null, tps: null};
       else try { out = await complete(base, b, timeout); }
       catch (e) { out = {text: "", finish: "error", ms: 0, tokens: null, tps: null, error: String(e.message || e)}; }
       const text = c.mode === "rag" ? R.tidyAnswer(out.text) : out.text;
-      const sh = c.mode === "rag" && !out.error ? shownAnswer(text, hits, exact) : {text, removed: 0, doses: []};
+      const sh = !out.error ? shownAnswer(text, hits, exact, c.question, c.mode) : {text, removed: 0, doses: []};
       const checks = out.error ? [{check: "request", ok: false, detail: out.error}] : scoreAnswer(c, text, {hits, exact, shown: sh.text, finish: out.finish});
       // with the exact box shown the model was told to write no figure at all: count the ones it wrote anyway
-      const figs = exact.length && out.finish !== "no-sources" ? X.figures(text).length : 0;
+      const figs = exact.length && !["no-sources", "refused"].includes(out.finish) ? X.figures(text).length : 0;
       r.runs.push({answer: text, shown: sh.text !== text ? sh.text : undefined, removed: sh.removed, removedDoses: sh.doses, figuresDespiteExact: figs,
                    finish: out.finish, ms: out.ms, tokens: out.tokens, tps: out.tps, checks, pass: checks.every(x => x.ok)});
       log(`${r.runs.at(-1).pass ? "pass" : "FAIL"} ${c.id} #${i + 1}${out.ms ? ` (${(out.ms / 1000).toFixed(1)} s)` : ""}` +
@@ -460,8 +476,10 @@ async function main(){
   if (a.list){ for (const c of cases) console.log(`${c.id.padEnd(28)} ${c.mode.padEnd(5)} ${(c.topic || "").padEnd(20)} ${c.question}`); return 0; }
   if (!cases.length) throw new Error("no cases selected");
   let index;
-  if (cases.some(c => c.mode === "rag")){
-    const spec = a.index || path.join(ROOT, "www/docs/index.js");
+  const spec = a.index || path.join(ROOT, "www/docs/index.js");
+  if (!cases.some(c => c.mode === "rag") && cases.some(c => chat.firstAidQuestion(c.question)) && spec !== "notes" && !fs.existsSync(spec))
+    console.error(`note: ${spec} not found: Chat first aid cases are asked without the manuals' passages (pass --index)`);
+  else if (cases.some(c => c.mode === "rag" || chat.firstAidQuestion(c.question))){
     if (spec !== "notes" && !fs.existsSync(spec))
       throw new Error(`${spec} not found: run this from a built kit, pass --index <kit>/www/docs/index.js, or --index notes (Australian notes only)`);
     index = loadIndex(spec);
