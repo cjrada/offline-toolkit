@@ -219,12 +219,16 @@ older US manual differs. The passages used are linked under the answer. Other qu
 `www/docs/exact.js` `medicineRoute`; code, not only a prompt rule).
 * **Safety is the output guard**, on both pages and every AI answer as it streams, whatever the question. Every
   dose-like figure in the AI's text (mg, mcg, ml, tablets, capsules, drops, puffs, sachets, units, spoons, mg/kg,
-  frequencies in digits or words, daily maxima, fractions of a tablet) is removed (*[dose removed]*, with the packet /
+  frequencies in digits or words, repeats ("four times", "twice"), multipliers ("2 x 500 mg"), a count of a drug
+  ("eight paracetamol"), "a gram", daily maxima, fractions of a tablet) is removed (*[dose removed]*, with the packet /
   pharmacist / Healthdirect 1800 022 222 / 000 pointer) unless one row of the sources shown to the reader holds it:
   the same value however written ("four times daily" = "4 times a day"), every figure of the clause in that one row,
   the person it names (adults, children, 15 kg) in that row or its heading, the volume of water and strength in that
   passage, a dosing row (not a water-treatment row) for "take / give", and the same drug. In Chat with no passages
-  shown, every such figure is removed. So "Adults take 2 iodine tablets once a day" is removed unless that row is in a
+  shown, every mg-type figure is removed, and the other amounts wherever they can be a dose: the conversation or the
+  answer names a medicine, or the sentence is about taking or giving, names a person, holds an mg figure or uses a
+  medicine's own unit (tablets, capsules, puffs...) outside water treatment. A recipe, bleach drops for water, an ORS
+  recipe or "check every 2 hours" stay, with no medicine pointer. So "Adults take 2 iodine tablets once a day" is removed unless that row is in a
   shown source, and water-treatment amounts from the shown sources (bleach drops, 16 mg iodine tablets per quart,
   8 mg of chlorine per litre) are kept. The guard compares with whatever was shown, not with a drug list, so curated
   medical references added to the index later work as they are.

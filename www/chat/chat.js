@@ -143,7 +143,7 @@ if (typeof document !== "undefined") {
     if (!session.isCurrent(turn) || ctl.signal.aborted) { session.finish(turn, ""); done(); return; }   // cleared or stopped meanwhile
     const req = chatRequest(session.history, {ctx, ix});
     const d = bubble("assistant", ""); d.querySelector(".body").textContent = "Thinking… (on a laptop without a GPU this can take a minute)";
-    const shown = req.hits.map(h => h.t);   // the first aid passages listed under the answer (none: every dose figure is removed)
+    const shown = req.hits.map(h => h.t);   // the first aid passages listed under the answer (none: every figure that can be a dose is removed)
     const show = t => { setBody(d, "assistant", guardMedicine(q, t, prior, {chat: true, sources: shown}).text);
       if (!req.hits.length) return;
       const byDoc = new Map(); for (const h of req.hits) (byDoc.get(h.f) || byDoc.set(h.f, []).get(h.f)).push(h);
