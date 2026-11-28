@@ -4,7 +4,8 @@
 // Replies are rendered with ../md.js (escaped first, then a small markdown subset; no links, no HTML).
 // Chat never states medicine doses (../medicine.js): a dose question is answered with CHAT_REFUSAL (Ask the Manuals shows
 // any dose the kit's documents give, word for word; plus the safe pointer) without asking the AI, and every answer is
-// guarded as it streams: any dose-like figure not in the first aid passages shown under it is removed. First aid questions are answered from the kit's manuals: the page searches them
+// guarded as it streams: any dose-like figure not in the first aid passages shown under it is removed (with no passages:
+// every mg-type figure, and other amounts in a medicine context). First aid questions are answered from the kit's manuals: the page searches them
 // (../docs/retrieve.js over ../docs/index.js, loaded only for such a question) and sends the passages with the prompt.
 import {renderMarkdown, esc} from "../md.js";
 import {watchAI, aiContext, DEFAULT_CTX} from "../ai-status.js";
@@ -143,7 +144,7 @@ if (typeof document !== "undefined") {
     if (!session.isCurrent(turn) || ctl.signal.aborted) { session.finish(turn, ""); done(); return; }   // cleared or stopped meanwhile
     const req = chatRequest(session.history, {ctx, ix});
     const d = bubble("assistant", ""); d.querySelector(".body").textContent = "Thinking… (on a laptop without a GPU this can take a minute)";
-    const shown = req.hits.map(h => h.t);   // the first aid passages listed under the answer (none: every dose figure is removed)
+    const shown = req.hits.map(h => h.t);   // the first aid passages listed under the answer (none: mg figures, and amounts in a medicine context, are removed)
     const show = t => { setBody(d, "assistant", guardMedicine(q, t, prior, {chat: true, sources: shown}).text);
       if (!req.hits.length) return;
       const byDoc = new Map(); for (const h of req.hits) (byDoc.get(h.f) || byDoc.set(h.f, []).get(h.f)).push(h);

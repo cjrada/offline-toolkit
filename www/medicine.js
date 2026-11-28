@@ -6,10 +6,13 @@
 // SAFETY is the output guard, and it never depends on how the question was classified:
 //   guardMedicine(q, answer, prior, {sources, chat}), on every AI answer as it streams: every dose-like figure (mg, mcg,
 //   ml, tablets / capsules / drops / puffs / sachets / units, spoons, mg/kg, frequencies in digits or words, daily
-//   maxima, fractions of a tablet) that is not in ONE row of the sources shown to the reader, with the conditions this
-//   answer gives it (same person, volume of water, strength, a dosing row for "take / give", the same drug), becomes
-//   "[dose removed]", with the safe pointer. Chat with no passages shown: every such figure is removed. A dose that is
-//   in a shown source row is kept, so documents added to the index later (curated medical references) work as they are.
+//   maxima, fractions of a tablet, multipliers "2 x" / "N times", a count of a named drug, "a gram") that is not in ONE
+//   row of the sources shown to the reader, with the conditions this answer gives it (same person, volume of water,
+//   strength, a dosing row for "take / give", the same drug), becomes "[dose removed]", with the safe pointer. Chat with
+//   no passages shown: every mg-type figure is removed, and the other amounts (ml, g, spoons, drops, every N hours...)
+//   where a medicine is named or a sentence is about taking or giving something (a recipe or bleach drops for water
+//   stay). A dose that is in a shown source row is kept, so documents added to the index later (curated medical
+//   references) work as they are.
 //
 // ROUTING only decides what the reader is shown (UX), never whether a figure gets through:
 //   medicineDoseQuestion(q, prior): a medicine dose question is not sent to the AI. Ask the Manuals (docs/exact.js
@@ -75,7 +78,7 @@ const waterOnly = s => WATER.test(s) && !MED.test(s) && !radiationIodine(s);
 
 // Numbers in digits or words ("7.5", "4 to 6", "four", "four to six").
 const NW = "(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|half|a half|quarter|one and a half)";
-const N1 = `(?:\\d+\\s*\\/\\s*\\d+|\\d+(?:[.,]\\d+)?|${NW})`;
+const N1 = `(?:\\d+\\s*\\/\\s*\\d+|\\d{1,3}(?:,\\d{3})+(?!\\d)|\\d+(?:[.,]\\d+)?|${NW})`;   // "1,000" is one number
 const N = `${N1}(?:\\s*(?:-|–|to|or)\\s*${N1})?`;
 // An mg-type figure, also a concentration ("2 mg/L" is kept only when a shown source states it).
 const ALWAYS = new RegExp(`(?<![\\w./])${N}\\s*(?:mg|milligrams?|mcg|micrograms?|µg|ug|iu|international units?)\\b(?:\\s*(?:\\/|per)\\s*(?:kg|kilo\\w*|dose|day|l\\b|lit(?:re|er)s?))?`, "gi");
@@ -89,7 +92,14 @@ const IN_MED = new RegExp(`(?<![\\w./])${N}\\s*(?:[a-z][a-z'-]*\\s+)?(?:${UNIT})
   // a fraction of a unit: "half a tablet", "a quarter of a tablet", "one and a half tablets"
   `|\\b(?:(?:one|two|three)\\s+and\\s+)?(?:an?\\s+)?(?:half|quarter|third)\\s+(?:of\\s+)?(?:an?\\s+)?(?:${UNIT})\\b` +
   // a daily maximum with no unit: "max 6 in a day", "no more than 8 in 24 hours", "up to 4 a day"
-  `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b`, "gi");
+  `|\\b(?:max(?:imum)?(?:\\s+of)?|up to|no more than|not more than)\\s+${N}\\s*(?:\\w+\\s+)?(?:in|a|per|each)\\s+(?:a\\s+)?(?:day|24\\s*h\\w*)\\b` +
+  // a multiplier or a count of times: "2 x 500mg", "2 × 500 mg", "four times" (also with no "a day")
+  `|(?<![\\w./])${N1}\\s*(?:x|×)(?=\\s*\\d)|(?<![\\w./])${N}\\s*times\\b` +
+  // "a gram", "a milligram"
+  `|\\ban?\\s+(?:grams?|g|milligrams?|mg|micrograms?|mcg)\\b`, "gi");
+// A count with a medicine as its unit: "eight paracetamol", "40 Panadol", "2 children's Nurofen".
+// The span is the number only, so the drug's name stays readable ("Take [dose removed] paracetamol").
+const COUNT_MED = new RegExp(`(?<![\\w./])${N}(?=\\s*(?:[a-z][a-z'-]*\\s+)?(?:${MED_NAMES})\\b)`, "gi");
 // The earlier user turns of a conversation, as text (history: [{role, content}] or [string]).
 const userTurns = (history = []) => history.map(m => typeof m === "string" ? m : m.role === "user" ? m.content : "").join("\n");
 // A medicine dose question:
@@ -118,7 +128,7 @@ const sentenceSpans = t => { const out = [], re = /[.!?](?=\s|$)|\n/g; let s = 0
 // safe). Otherwise only mg-type figures outside water-treatment sentences, and the amounts in a sentence holding one.
 export function medicineDoseSpans(text, {medicine = MED.test(String(text))} = {}){
   text = String(text); const spans = [], add = (re, s, off) => { for (const m of s.matchAll(re)) spans.push([off + m.index, off + m.index + m[0].length]); };
-  if (medicine){ add(ALWAYS, text, 0); add(IN_MED, text, 0); }
+  if (medicine){ add(ALWAYS, text, 0); add(IN_MED, text, 0); add(COUNT_MED, text, 0); }
   else for (const [a, b] of sentenceSpans(text)){
     const s = text.slice(a, b); if (waterOnly(s) || !hasAlways(s)) continue;          // "16 mg iodine tablets per quart" stays
     add(ALWAYS, s, a); add(IN_MED, s, a);
@@ -131,10 +141,11 @@ export function medicineDoseSpans(text, {medicine = MED.test(String(text))} = {}
 // ---- the output guard: safety rests on what the AI wrote, never on how the question was classified
 // Every dose-like figure in the AI's text (mg, mcg, ml, tablets / capsules / drops / puffs / sachets / units, spoons,
 // mg/kg, frequencies in digits or words, daily maxima, fractions of a tablet), whatever the question and whether or not
-// a medicine is named.
-export function doseLikeSpans(text){
+// a medicine is named. generic: false leaves out the amounts that are not medicine-only (ml, g, spoons, drops, tablets,
+// every N hours, for N days...): Chat with no passages shown keeps them outside a medicine context (a recipe, bleach drops).
+export function doseLikeSpans(text, {generic = true} = {}){
   text = String(text); const spans = [];
-  for (const re of [ALWAYS, IN_MED]) for (const m of text.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
+  for (const re of generic ? [ALWAYS, COUNT_MED, IN_MED] : [ALWAYS, COUNT_MED]) for (const m of text.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
   spans.sort((x, y) => x[0] - y[0]);
   const out = []; for (const [a, b] of spans){ const l = out.at(-1); if (l && a <= l[1]) l[1] = Math.max(l[1], b); else out.push([a, b]); }
   return out;
@@ -149,7 +160,9 @@ const KEY_UNITS = [[/^(?:mg|milligrams?)$/, "mg"], [/^(?:mcg|micrograms?|µg|ug)
   [/^(?:day|days|daily)$/, "day"], [/^(?:kg|kilo\w*)$/, "kg"], [/^(?:l|lit(?:re|er)s?)$/, "l"], [/^(?:times?|x)$/, "times"],
   [/^(?:every|max|for)$/, null]];
 export function doseKey(fig){
-  let s = String(fig).toLowerCase().replace(/[–—]/g, "-").replace(/(\d)([a-z])/g, "$1 $2");
+  let s = String(fig).toLowerCase().replace(/[–—]/g, "-").replace(/×/g, " x ").replace(/(\d)([a-z])/g, "$1 $2")
+       .replace(/(\d),(?=\d{3}(?!\d))/g, "$1")                                                 // "1,000" = "1000"
+       .replace(/(^|\s)an?\s+(?=(?:grams?|g|milligrams?|mg|micrograms?|mcg)\b)/g, (m, sp) => sp + "1 ");   // "a gram" = "1 g"
   s = s.replace(/\b(?:no|not)\s+more\s+than\b|\bup\s+to\b|\bmaximum(?:\s+of)?\b/g, "max").replace(/\bin\s+24\s*h\w*\b/g, "a day")
        .replace(/\bonce\b/g, "1 times").replace(/\btwice\b/g, "2 times").replace(/\bthrice\b/g, "3 times")
        .replace(/\b(\w+)-hourly\b/g, "every $1 h").replace(/\b(\w+)\s+hourly\b/g, "every $1 h")
@@ -211,12 +224,20 @@ export function guardMedicine(q, answer, prior = [], {chat = false, sources = []
   let text = String(answer);
   const rows = (Array.isArray(sources) ? sources : [sources]).flatMap(rowsOf), cut = [];
   const convo = medicinesIn(String(q) + "\n" + userTurns(prior));
+  // No source shown (Chat's general answers): mg-type figures are always removed, but the amounts that are not
+  // medicine-only (ml, g, spoons, drops, tablets, every N hours, for N days...) only in a medicine context: the
+  // conversation or the answer names a medicine (also iodine for radiation), or the sentence holds an mg-type figure,
+  // a dose word or a take / give intake. "Mix 500 g of flour", "8 drops of bleach per gallon", "every 2 hours" stay.
+  const all = String(q) + "\n" + userTurns(prior) + "\n" + text;
+  const medAnswer = MED.test(all) || radiationIodine(String(q)) || radiationIodine(text);
+  const generic = sen => rows.length > 0 || medAnswer || hasAlways(sen) || INTAKE.test(sen) || DOSE_WORD.test(sen);
   for (const [a, b] of sentenceSpans(text)){
     const sen = text.slice(a, b), drugs = medicinesIn(sen).size ? medicinesIn(sen) : medicinesIn(text.slice(0, a)).size ? medicinesIn(text.slice(0, a)) : convo;
-    // a clause: up to , ; ( ) or " - " (so "for 1 quart add 5 drops, for 1 gallon add 1/4 teaspoon" is two rows)
-    const cl = []; { const re = /[,;()]|\s-\s/g; let s0 = 0, m; while ((m = re.exec(sen))){ cl.push([s0, m.index]); s0 = m.index + m[0].length; } cl.push([s0, sen.length]); }
+    // a clause: up to , ; ( ) or " - " (so "for 1 quart add 5 drops, for 1 gallon add 1/4 teaspoon" is two rows);
+    // never at a comma between digits ("1,000 mg" is one figure)
+    const g = generic(sen), cl = []; { const re = /,(?!(?<=\d,)\d)|[;()]|\s-\s/g; let s0 = 0, m; while ((m = re.exec(sen))){ cl.push([s0, m.index]); s0 = m.index + m[0].length; } cl.push([s0, sen.length]); }
     for (const [c0, c1] of cl){
-      const spans = doseLikeSpans(sen.slice(c0, c1)).map(([x, y]) => [a + c0 + x, a + c0 + y]);
+      const spans = doseLikeSpans(sen.slice(c0, c1), {generic: g}).map(([x, y]) => [a + c0 + x, a + c0 + y]);
       if (!spans.length) continue;
       if (!grounded(spans.map(([x, y]) => doseKey(text.slice(x, y))), sen, drugs, rows)) cut.push(...spans);
     }

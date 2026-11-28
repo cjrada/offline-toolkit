@@ -219,12 +219,16 @@ older US manual differs. The passages used are linked under the answer. Other qu
 `www/docs/exact.js` `medicineRoute`; code, not only a prompt rule).
 * **Safety is the output guard**, on both pages and every AI answer as it streams, whatever the question. Every
   dose-like figure in the AI's text (mg, mcg, ml, tablets, capsules, drops, puffs, sachets, units, spoons, mg/kg,
-  frequencies in digits or words, daily maxima, fractions of a tablet) is removed (*[dose removed]*, with the packet /
+  frequencies in digits or words, daily maxima, fractions of a tablet, multipliers such as "2 x 500 mg" or "four
+  times", a count of a named drug such as "eight paracetamol", "a gram") is removed (*[dose removed]*, with the packet /
   pharmacist / Healthdirect 1800 022 222 / 000 pointer) unless one row of the sources shown to the reader holds it:
-  the same value however written ("four times daily" = "4 times a day"), every figure of the clause in that one row,
+  the same value however written ("four times daily" = "4 times a day", "1,000 mg" = "1000 mg"), every figure of the clause in that one row,
   the person it names (adults, children, 15 kg) in that row or its heading, the volume of water and strength in that
   passage, a dosing row (not a water-treatment row) for "take / give", and the same drug. In Chat with no passages
-  shown, every such figure is removed. So "Adults take 2 iodine tablets once a day" is removed unless that row is in a
+  shown, every mg-type figure is removed, and the other amounts (ml, g, spoons, drops, tablets, every N hours, for N
+  days) are removed where the conversation or answer names a medicine, or the sentence is about taking or giving
+  something, uses a dose word or holds an mg figure. A bread recipe, bleach drops per gallon, an ORS recipe or "check
+  circulation every 2 hours" stay. So "Adults take 2 iodine tablets once a day" is removed unless that row is in a
   shown source, and water-treatment amounts from the shown sources (bleach drops, 16 mg iodine tablets per quart,
   8 mg of chlorine per litre) are kept. The guard compares with whatever was shown, not with a drug list, so curated
   medical references added to the index later work as they are.
